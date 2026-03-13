@@ -1,4 +1,4 @@
-"""Tab 2: Price Regime — monthly aggregated price analysis."""
+"""Tab 2: Price Analysis — DA prices, heatmaps, spreads for France."""
 
 import numpy as np
 import pandas as pd
@@ -6,25 +6,22 @@ import plotly.graph_objects as go
 from dash import Input, Output, dcc, html
 
 from components.charts import (
+    build_price_heatmap,
+    price_bar_chart,
     _empty_figure,
-    heatmap_chart,
-    monthly_bar_with_rolling_avg,
 )
 from components.kpi_cards import kpi_card
 from components.theme import COLORS, apply_theme, card_style
-from data.api_client import (
-    fetch_day_ahead_prices,
-    fetch_monthly_prices,
-)
+from data.api_client import fetch_day_ahead_prices
 
 
 def layout():
     return html.Div(
         [
-            html.Div(id="prices-kpis"),
+            html.Div(id="fr-prices-kpis"),
             html.Div(
                 dcc.Graph(
-                    id="prices-timeseries",
+                    id="fr-prices-timeseries",
                     config={"displayModeBar": False},
                 ),
                 style=card_style(),
@@ -33,7 +30,7 @@ def layout():
                 [
                     html.Div(
                         dcc.Graph(
-                            id="prices-heatmap",
+                            id="fr-prices-heatmap",
                             config={
                                 "displayModeBar": False
                             },
@@ -45,7 +42,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="prices-duration",
+                            id="fr-prices-duration",
                             config={
                                 "displayModeBar": False
                             },
@@ -65,7 +62,7 @@ def layout():
                 [
                     html.Div(
                         dcc.Graph(
-                            id="prices-spread",
+                            id="fr-prices-spread",
                             config={
                                 "displayModeBar": False
                             },
@@ -77,7 +74,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="prices-negative",
+                            id="fr-prices-negative",
                             config={
                                 "displayModeBar": False
                             },
@@ -100,12 +97,14 @@ def layout():
 def register_callbacks(app):
     @app.callback(
         [
-            Output("prices-kpis", "children"),
-            Output("prices-timeseries", "figure"),
-            Output("prices-heatmap", "figure"),
-            Output("prices-duration", "figure"),
-            Output("prices-spread", "figure"),
-            Output("prices-negative", "figure"),
+            Output("fr-prices-kpis", "children"),
+            Output(
+                "fr-prices-timeseries", "figure"
+            ),
+            Output("fr-prices-heatmap", "figure"),
+            Output("fr-prices-duration", "figure"),
+            Output("fr-prices-spread", "figure"),
+            Output("fr-prices-negative", "figure"),
         ],
         [
             Input("date-start", "date"),
@@ -117,27 +116,37 @@ def register_callbacks(app):
             start_date
         ).to_pydatetime()
         end = pd.Timestamp(end_date).to_pydatetime()
-        monthly = fetch_monthly_prices(start, end)
         df = fetch_day_ahead_prices(start, end)
 
-        # --- KPIs ---
-        if not monthly.empty:
-            avg_price = monthly["avg_price"].mean()
-            avg_spread = monthly["spread"].mean()
-            total_neg = int(
-                monthly["negative_hours"].sum()
+        # KPIs
+        if not df.empty:
+            avg_price = df["price_eur_mwh"].mean()
+            max_price = df["price_eur_mwh"].max()
+            neg_hours = int(
+                (df["price_eur_mwh"] < 0).sum()
             )
-            avg_vol = monthly["std_dev"].mean()
+
+            df_tmp = df.copy()
+            df_tmp["hour"] = df_tmp[
+                "timestamp"
+            ].dt.hour
+            peak = df_tmp[
+                df_tmp["hour"].between(8, 19)
+            ]["price_eur_mwh"].mean()
+            offpeak = df_tmp[
+                ~df_tmp["hour"].between(8, 19)
+            ]["price_eur_mwh"].mean()
+            spread = peak - offpeak
 
             avg_str = f"{avg_price:.1f} EUR/MWh"
-            spread_str = f"{avg_spread:.1f} EUR/MWh"
-            neg_str = str(total_neg)
-            vol_str = f"{avg_vol:.1f} EUR/MWh"
+            spread_str = f"{spread:.1f} EUR/MWh"
+            neg_str = str(neg_hours)
+            max_str = f"{max_price:.1f} EUR/MWh"
         else:
             avg_str = "N/A"
             spread_str = "N/A"
             neg_str = "N/A"
-            vol_str = "N/A"
+            max_str = "N/A"
 
         kpis = html.Div(
             [
@@ -147,7 +156,7 @@ def register_callbacks(app):
                 ),
                 html.Div(
                     kpi_card(
-                        "Avg Peak/Off-Peak Spread",
+                        "Peak/Off-Peak Spread",
                         spread_str,
                     ),
                     style={"flex": "1"},
@@ -160,10 +169,7 @@ def register_callbacks(app):
                     style={"flex": "1"},
                 ),
                 html.Div(
-                    kpi_card(
-                        "Price Volatility (Std Dev)",
-                        vol_str,
-                    ),
+                    kpi_card("Max Price", max_str),
                     style={"flex": "1"},
                 ),
             ],
@@ -174,74 +180,15 @@ def register_callbacks(app):
             },
         )
 
-        # --- Chart 1: Monthly avg price with rolling averages ---
-        if not monthly.empty:
-            ts_fig = monthly_bar_with_rolling_avg(
-                x=monthly["month_str"],
-                y=monthly["avg_price"],
-                title="Monthly Avg DA Price",
-                y_title="EUR/MWh",
-                bar_color=COLORS["accent_blue"],
-                rolling_windows=[
-                    (
-                        6,
-                        "6M Rolling",
-                        COLORS["accent_amber"],
-                    ),
-                    (
-                        12,
-                        "12M Rolling",
-                        COLORS["accent_red"],
-                    ),
-                ],
-            )
-        else:
-            ts_fig = _empty_figure(
-                "Monthly Avg Price"
-            )
+        # Timeseries
+        ts_fig = price_bar_chart(
+            df, "Hourly Day-Ahead Prices"
+        )
 
-        # --- Chart 2: Price heatmap (hour x month) ---
-        if not df.empty:
-            df_hm = df.copy()
-            df_hm["hour"] = df_hm[
-                "timestamp"
-            ].dt.hour
-            df_hm["month"] = (
-                df_hm["timestamp"]
-                .dt.to_period("M")
-                .astype(str)
-            )
-            pivot = df_hm.pivot_table(
-                values="price_eur_mwh",
-                index="month",
-                columns="hour",
-                aggfunc="mean",
-            )
-            pivot = pivot.sort_index(ascending=True)
-            hours = list(range(24))
-            existing = [
-                h
-                for h in hours
-                if h in pivot.columns
-            ]
+        # Heatmap
+        hm_fig = build_price_heatmap(df)
 
-            hm_fig = heatmap_chart(
-                z_data=pivot[existing].values,
-                x_labels=[
-                    f"{h:02d}:00" for h in existing
-                ],
-                y_labels=list(pivot.index),
-                title=(
-                    "Price Heatmap"
-                    " (Avg EUR/MWh by Hour & Month)"
-                ),
-                colorscale="RdYlGn_r",
-                z_label="EUR/MWh",
-            )
-        else:
-            hm_fig = _empty_figure("Price Heatmap")
-
-        # --- Chart 3: Price duration curve ---
+        # Duration curve
         if not df.empty:
             sorted_prices = np.sort(
                 df["price_eur_mwh"].dropna().values
@@ -292,77 +239,114 @@ def register_callbacks(app):
                 "Price Duration Curve"
             )
 
-        # --- Chart 4: Monthly peak/off-peak spread ---
-        if not monthly.empty:
-            spread_fig = monthly_bar_with_rolling_avg(
-                x=monthly["month_str"],
-                y=monthly["spread"],
-                title=(
-                    "Monthly Peak/Off-Peak"
-                    " Spread Trend"
-                ),
-                y_title="EUR/MWh",
-                bar_color=COLORS["accent_amber"],
-                rolling_windows=[
-                    (
-                        6,
-                        "6M Rolling",
-                        COLORS["accent_cyan"],
+        # Peak vs off-peak spread
+        if not df.empty:
+            df_tmp = df.copy()
+            df_tmp["date"] = df_tmp[
+                "timestamp"
+            ].dt.date
+            df_tmp["hour"] = df_tmp[
+                "timestamp"
+            ].dt.hour
+            daily = df_tmp.groupby("date").apply(
+                lambda g: pd.Series({
+                    "peak": g[
+                        g["hour"].between(8, 19)
+                    ]["price_eur_mwh"].mean(),
+                    "offpeak": g[
+                        ~g["hour"].between(8, 19)
+                    ]["price_eur_mwh"].mean(),
+                }),
+                include_groups=False,
+            )
+            daily["spread"] = (
+                daily["peak"] - daily["offpeak"]
+            )
+            daily = daily.reset_index()
+
+            spread_fig = go.Figure()
+            spread_fig.add_trace(
+                go.Bar(
+                    x=daily["date"],
+                    y=daily["spread"],
+                    marker_color=COLORS[
+                        "accent_amber"
+                    ],
+                    marker_line_width=0,
+                    hovertemplate=(
+                        "%{x}<br>Spread: %{y:.1f}"
+                        " EUR/MWh<extra></extra>"
                     ),
-                ],
+                )
+            )
+            apply_theme(spread_fig)
+            spread_fig.update_layout(
+                title=dict(
+                    text=(
+                        "Daily Peak/Off-Peak Spread"
+                    ),
+                    font=dict(size=15),
+                ),
+                yaxis=dict(title="EUR/MWh"),
             )
         else:
             spread_fig = _empty_figure(
                 "Peak/Off-Peak Spread"
             )
 
-        # --- Chart 5: Monthly negative price hours ---
-        if not monthly.empty:
-            neg_fig = go.Figure(
-                go.Bar(
-                    x=monthly["month_str"].tolist(),
-                    y=monthly[
-                        "negative_hours"
-                    ].tolist(),
-                    marker_color=COLORS["accent_red"],
-                    marker_line_width=0,
-                    hovertemplate=(
-                        "%{x}<br>%{y} hours"
-                        "<extra></extra>"
+        # Negative price hours
+        if not df.empty:
+            df_tmp = df.copy()
+            df_tmp["month"] = df_tmp[
+                "timestamp"
+            ].dt.to_period("M")
+            neg_by_month = (
+                df_tmp[df_tmp["price_eur_mwh"] < 0]
+                .groupby("month")
+                .size()
+                .reset_index(name="neg_hours")
+            )
+            neg_by_month["month"] = neg_by_month[
+                "month"
+            ].astype(str)
+
+            if not neg_by_month.empty:
+                neg_fig = go.Figure(
+                    go.Bar(
+                        x=neg_by_month["month"],
+                        y=neg_by_month["neg_hours"],
+                        marker_color=COLORS[
+                            "accent_red"
+                        ],
+                        marker_line_width=0,
+                    )
+                )
+            else:
+                neg_fig = go.Figure(
+                    go.Bar(x=[], y=[])
+                )
+                neg_fig.add_annotation(
+                    text="No negative price hours",
+                    xref="paper",
+                    yref="paper",
+                    x=0.5,
+                    y=0.5,
+                    showarrow=False,
+                    font=dict(
+                        color=COLORS["text_muted"],
+                        size=14,
                     ),
                 )
-            )
-            # Add trend line
-            neg_series = pd.Series(
-                monthly["negative_hours"].values
-            )
-            rolling = neg_series.rolling(
-                6, min_periods=1
-            ).mean()
-            neg_fig.add_trace(
-                go.Scatter(
-                    x=monthly["month_str"].tolist(),
-                    y=rolling.tolist(),
-                    mode="lines",
-                    name="6M Trend",
-                    line=dict(
-                        color=COLORS["accent_amber"],
-                        width=2.5,
-                    ),
-                )
-            )
             apply_theme(neg_fig)
             neg_fig.update_layout(
                 title=dict(
                     text=(
-                        "Monthly Negative Price Hours"
+                        "Negative Price Hours"
+                        " by Month"
                     ),
                     font=dict(size=15),
                 ),
                 yaxis=dict(title="Hours"),
-                legend=dict(
-                    orientation="h", y=-0.15
-                ),
             )
         else:
             neg_fig = _empty_figure(

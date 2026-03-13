@@ -1,6 +1,7 @@
 """
-Energy-Charts API client for German power market data.
+Energy-Charts API client for French power market data.
 Data source: Fraunhofer ISE (https://api.energy-charts.info/)
+Uses country=fr / bzn=FR for France bidding zone.
 """
 
 import time
@@ -14,20 +15,21 @@ TIMEOUT = 30
 
 # Simple in-memory cache: {cache_key: (timestamp, data)}
 _cache: dict[str, tuple[float, pd.DataFrame]] = {}
-CACHE_TTL = 600  # 10 minutes (strategic data)
+CACHE_TTL = 300  # 5 minutes
 
 
 def _cache_key(endpoint: str, params: dict) -> str:
     sorted_params = sorted(params.items())
-    return f"{endpoint}|{'|'.join(f'{k}={v}' for k, v in sorted_params)}"
+    return (
+        f"{endpoint}|"
+        f"{'|'.join(f'{k}={v}' for k, v in sorted_params)}"
+    )
 
 
-def _get_cached(
-    key: str, ttl: int | None = None
-) -> pd.DataFrame | None:
+def _get_cached(key: str) -> pd.DataFrame | None:
     if key in _cache:
         ts, data = _cache[key]
-        if time.time() - ts < (ttl or CACHE_TTL):
+        if time.time() - ts < CACHE_TTL:
             return data
         del _cache[key]
     return None
@@ -43,7 +45,9 @@ def _format_date(dt: datetime) -> str:
 
 def _api_get(endpoint: str, params: dict) -> dict:
     url = f"{BASE_URL}{endpoint}"
-    resp = requests.get(url, params=params, timeout=TIMEOUT)
+    resp = requests.get(
+        url, params=params, timeout=TIMEOUT
+    )
     resp.raise_for_status()
     return resp.json()
 
@@ -52,14 +56,14 @@ def fetch_day_ahead_prices(
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> pd.DataFrame:
-    """Fetch hourly day-ahead prices for Germany (EUR/MWh)."""
+    """Fetch hourly day-ahead prices for France (EUR/MWh)."""
     if end is None:
         end = datetime.now()
     if start is None:
         start = end - timedelta(days=7)
 
     params = {
-        "bzn": "DE-LU",
+        "bzn": "FR",
         "start": _format_date(start),
         "end": _format_date(end),
     }
@@ -68,22 +72,33 @@ def fetch_day_ahead_prices(
     if cached is not None:
         return cached
 
-    data = _api_get("/price", params)
+    try:
+        data = _api_get("/price", params)
+    except requests.HTTPError:
+        return pd.DataFrame(
+            columns=["timestamp", "price_eur_mwh"]
+        )
 
     unix_seconds = data.get("unix_seconds", [])
     price = data.get("price", [])
 
     if not unix_seconds or not price:
-        return pd.DataFrame(columns=["timestamp", "price_eur_mwh"])
+        return pd.DataFrame(
+            columns=["timestamp", "price_eur_mwh"]
+        )
 
     df = pd.DataFrame({
-        "timestamp": pd.to_datetime(unix_seconds, unit="s", utc=True),
+        "timestamp": pd.to_datetime(
+            unix_seconds, unit="s", utc=True
+        ),
         "price_eur_mwh": price,
     })
     df["timestamp"] = df["timestamp"].dt.tz_convert(
-        "Europe/Berlin"
+        "Europe/Paris"
     )
-    df = df.sort_values("timestamp").reset_index(drop=True)
+    df = df.sort_values("timestamp").reset_index(
+        drop=True
+    )
     _set_cache(key, df)
     return df
 
@@ -92,14 +107,14 @@ def fetch_generation_by_source(
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> pd.DataFrame:
-    """Fetch 15-min generation data by source for Germany."""
+    """Fetch 15-min generation data by source for France."""
     if end is None:
         end = datetime.now()
     if start is None:
         start = end - timedelta(days=7)
 
     params = {
-        "country": "de",
+        "country": "fr",
         "start": _format_date(start),
         "end": _format_date(end),
     }
@@ -108,7 +123,10 @@ def fetch_generation_by_source(
     if cached is not None:
         return cached
 
-    data = _api_get("/public_power", params)
+    try:
+        data = _api_get("/public_power", params)
+    except requests.HTTPError:
+        return pd.DataFrame(columns=["timestamp"])
 
     unix_seconds = data.get("unix_seconds", [])
     if not unix_seconds:
@@ -164,9 +182,11 @@ def fetch_generation_by_source(
 
     df = pd.DataFrame(records)
     df["timestamp"] = df["timestamp"].dt.tz_convert(
-        "Europe/Berlin"
+        "Europe/Paris"
     )
-    df = df.sort_values("timestamp").reset_index(drop=True)
+    df = df.sort_values("timestamp").reset_index(
+        drop=True
+    )
     _set_cache(key, df)
     return df
 
@@ -175,14 +195,14 @@ def fetch_total_load(
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> pd.DataFrame:
-    """Fetch total electricity load for Germany."""
+    """Fetch total electricity load for France."""
     if end is None:
         end = datetime.now()
     if start is None:
         start = end - timedelta(days=7)
 
     params = {
-        "country": "de",
+        "country": "fr",
         "start": _format_date(start),
         "end": _format_date(end),
     }
@@ -191,14 +211,23 @@ def fetch_total_load(
     if cached is not None:
         return cached
 
-    data = _api_get("/total_power", params)
+    try:
+        data = _api_get("/total_power", params)
+    except requests.HTTPError:
+        return pd.DataFrame(
+            columns=["timestamp", "load_mw"]
+        )
 
     unix_seconds = data.get("unix_seconds", [])
 
     load_data = None
     for entry in data.get("production_types", []):
         name = entry.get("name", "")
-        if "load" in name.lower() and "residual" not in name.lower() and "renewable" not in name.lower():
+        if (
+            "load" in name.lower()
+            and "residual" not in name.lower()
+            and "renewable" not in name.lower()
+        ):
             load_data = entry.get("data", [])
             break
 
@@ -215,31 +244,39 @@ def fetch_total_load(
     })
     df = df.dropna(subset=["load_mw"])
     df["timestamp"] = df["timestamp"].dt.tz_convert(
-        "Europe/Berlin"
+        "Europe/Paris"
     )
-    df = df.sort_values("timestamp").reset_index(drop=True)
+    df = df.sort_values("timestamp").reset_index(
+        drop=True
+    )
     _set_cache(key, df)
     return df
 
 
 def fetch_installed_capacity() -> pd.DataFrame:
     """Fetch current installed capacity by source (MW)."""
-    key = _cache_key("/installed_power", {"country": "de"})
+    key = _cache_key(
+        "/installed_power", {"country": "fr"}
+    )
     cached = _get_cached(key)
     if cached is not None:
         return cached
 
-    data = _api_get(
-        "/installed_power",
-        {"country": "de", "time_step": "yearly"},
-    )
+    try:
+        data = _api_get(
+            "/installed_power",
+            {"country": "fr", "time_step": "yearly"},
+        )
+    except requests.HTTPError:
+        return pd.DataFrame(
+            columns=["source", "capacity_mw"]
+        )
 
     rows = []
     for entry in data.get("production_types", []):
         name = entry.get("name", "")
         values = entry.get("data", [])
         if values:
-            # Take the latest non-None value
             latest = None
             for v in reversed(values):
                 if v is not None:
@@ -260,14 +297,14 @@ def fetch_cross_border_flows(
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> pd.DataFrame:
-    """Fetch cross-border electricity flows for Germany."""
+    """Fetch cross-border electricity flows for France."""
     if end is None:
         end = datetime.now()
     if start is None:
         start = end - timedelta(days=7)
 
     params = {
-        "country": "de",
+        "country": "fr",
         "start": _format_date(start),
         "end": _format_date(end),
     }
@@ -280,18 +317,26 @@ def fetch_cross_border_flows(
         data = _api_get("/cbpf", params)
     except requests.HTTPError:
         return pd.DataFrame(
-            columns=["timestamp", "country", "flow_mw"]
+            columns=[
+                "timestamp",
+                "country",
+                "flow_mw",
+            ]
         )
 
     unix_seconds = data.get("unix_seconds", [])
     if not unix_seconds:
         return pd.DataFrame(
-            columns=["timestamp", "country", "flow_mw"]
+            columns=[
+                "timestamp",
+                "country",
+                "flow_mw",
+            ]
         )
 
     timestamps = pd.to_datetime(
         unix_seconds, unit="s", utc=True
-    ).tz_convert("Europe/Berlin")
+    ).tz_convert("Europe/Paris")
 
     rows = []
     for entry in data.get("production_types", []):
@@ -313,142 +358,6 @@ def fetch_cross_border_flows(
         )
     _set_cache(key, df)
     return df
-
-
-def fetch_installed_capacity_timeseries() -> pd.DataFrame:
-    """Fetch yearly installed capacity by source (2002-2030).
-
-    Returns DataFrame with columns: year, source, capacity_gw.
-    Uses 1-hour cache TTL since this data rarely changes.
-    """
-    params = {"country": "de", "time_step": "yearly"}
-    key = _cache_key("/installed_power_ts", params)
-    cached = _get_cached(key, ttl=3600)
-    if cached is not None:
-        return cached
-
-    data = _api_get("/installed_power", params)
-
-    years_raw = data.get("time", [])
-    if not years_raw:
-        return pd.DataFrame(
-            columns=["year", "source", "capacity_gw"]
-        )
-
-    # time field contains unix timestamps for each year
-    years = [
-        pd.Timestamp(t, unit="s").year
-        for t in years_raw
-    ]
-
-    source_map = {
-        "Solar": "solar",
-        "Wind onshore": "wind_onshore",
-        "Wind offshore": "wind_offshore",
-        "Fossil gas": "gas",
-        "Fossil hard coal": "hard_coal",
-        "Fossil brown coal / lignite": "lignite",
-        "Hydro": "hydro",
-        "Biomass": "biomass",
-        "Nuclear": "nuclear",
-        "Fossil oil": "oil",
-        "Battery Storage": "battery_storage",
-    }
-
-    rows = []
-    for entry in data.get("production_types", []):
-        name = entry.get("name", "")
-        clean_name = source_map.get(name, name.lower())
-        values = entry.get("data", [])
-        if not values:
-            continue
-        for year, val in zip(years, values):
-            capacity = val if val is not None else 0
-            rows.append({
-                "year": year,
-                "source": clean_name,
-                "capacity_gw": capacity / 1000.0,
-            })
-
-    df = pd.DataFrame(rows)
-    _set_cache(key, df)
-    return df
-
-
-def fetch_monthly_prices(
-    start: datetime | None = None,
-    end: datetime | None = None,
-) -> pd.DataFrame:
-    """Fetch hourly prices and aggregate to monthly stats.
-
-    Returns one row per month with columns:
-    month, avg_price, peak_avg, offpeak_avg, spread,
-    std_dev, negative_hours, min_price, max_price.
-    Uses 30-minute cache TTL.
-    """
-    if end is None:
-        end = datetime.now()
-    if start is None:
-        start = end - timedelta(days=365)
-
-    params = {
-        "bzn": "DE-LU",
-        "start": _format_date(start),
-        "end": _format_date(end),
-    }
-    key = _cache_key("/price_monthly", params)
-    cached = _get_cached(key, ttl=1800)
-    if cached is not None:
-        return cached
-
-    df = fetch_day_ahead_prices(start, end)
-    if df.empty:
-        return pd.DataFrame(columns=[
-            "month",
-            "avg_price",
-            "peak_avg",
-            "offpeak_avg",
-            "spread",
-            "std_dev",
-            "negative_hours",
-            "min_price",
-            "max_price",
-        ])
-
-    df = df.copy()
-    df["hour"] = df["timestamp"].dt.hour
-    df["month"] = df["timestamp"].dt.to_period("M")
-    df["is_peak"] = df["hour"].between(8, 19)
-
-    def _agg_month(g):
-        peak = g[g["is_peak"]]["price_eur_mwh"]
-        offpeak = g[~g["is_peak"]]["price_eur_mwh"]
-        peak_avg = peak.mean() if len(peak) > 0 else 0
-        offpeak_avg = (
-            offpeak.mean() if len(offpeak) > 0 else 0
-        )
-        return pd.Series({
-            "avg_price": g["price_eur_mwh"].mean(),
-            "peak_avg": peak_avg,
-            "offpeak_avg": offpeak_avg,
-            "spread": peak_avg - offpeak_avg,
-            "std_dev": g["price_eur_mwh"].std(),
-            "negative_hours": int(
-                (g["price_eur_mwh"] < 0).sum()
-            ),
-            "min_price": g["price_eur_mwh"].min(),
-            "max_price": g["price_eur_mwh"].max(),
-        })
-
-    monthly = (
-        df.groupby("month")
-        .apply(_agg_month, include_groups=False)
-        .reset_index()
-    )
-    monthly["month_str"] = monthly["month"].astype(str)
-
-    _set_cache(key, monthly)
-    return monthly
 
 
 def clear_cache() -> None:

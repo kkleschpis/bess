@@ -1,4 +1,4 @@
-"""Tab 6: Residual Load Structural — monthly trends and structural decline."""
+"""Tab 7: Residual Load & System — fundamental metric for BESS in France."""
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -58,11 +58,13 @@ def _compute_residual(load_df, gen_df):
 def layout():
     return html.Div(
         [
-            html.Div(id="residual-kpis"),
+            html.Div(id="fr-residual-kpis"),
             html.Div(
                 dcc.Graph(
-                    id="residual-curve",
-                    config={"displayModeBar": False},
+                    id="fr-residual-curve",
+                    config={
+                        "displayModeBar": False
+                    },
                 ),
                 style=card_style(),
             ),
@@ -70,7 +72,7 @@ def layout():
                 [
                     html.Div(
                         dcc.Graph(
-                            id="residual-scatter",
+                            id="fr-residual-scatter",
                             config={
                                 "displayModeBar": False
                             },
@@ -82,7 +84,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="residual-flows",
+                            id="fr-residual-flows",
                             config={
                                 "displayModeBar": False
                             },
@@ -100,8 +102,10 @@ def layout():
             ),
             html.Div(
                 dcc.Graph(
-                    id="residual-heatmap",
-                    config={"displayModeBar": False},
+                    id="fr-residual-heatmap",
+                    config={
+                        "displayModeBar": False
+                    },
                 ),
                 style=card_style(),
             ),
@@ -112,11 +116,21 @@ def layout():
 def register_callbacks(app):
     @app.callback(
         [
-            Output("residual-kpis", "children"),
-            Output("residual-curve", "figure"),
-            Output("residual-scatter", "figure"),
-            Output("residual-flows", "figure"),
-            Output("residual-heatmap", "figure"),
+            Output(
+                "fr-residual-kpis", "children"
+            ),
+            Output(
+                "fr-residual-curve", "figure"
+            ),
+            Output(
+                "fr-residual-scatter", "figure"
+            ),
+            Output(
+                "fr-residual-flows", "figure"
+            ),
+            Output(
+                "fr-residual-heatmap", "figure"
+            ),
         ],
         [
             Input("date-start", "date"),
@@ -142,72 +156,24 @@ def register_callbacks(app):
 
         merged = _compute_residual(load_df, gen_df)
 
-        # --- KPIs ---
+        # KPIs
         if not merged.empty:
-            # Monthly aggregation for trailing 12m
-            m = merged.copy()
-            m["month"] = m[
-                "timestamp"
-            ].dt.to_period("M")
-            monthly_res = (
-                m.groupby("month")["residual_load"]
-                .mean()
-                .reset_index()
-            )
-
-            avg_res = (
-                f"{monthly_res['residual_load'].mean():,.0f}"
+            current_res = (
+                f"{merged['residual_load'].iloc[-1]:,.0f}"
                 " MW"
             )
-
-            # Trend vs prior year
-            if len(monthly_res) >= 24:
-                recent_12 = monthly_res.tail(12)[
-                    "residual_load"
-                ].mean()
-                prior_12 = monthly_res.iloc[-24:-12][
-                    "residual_load"
-                ].mean()
-                trend = recent_12 - prior_12
-                sign = "+" if trend >= 0 else ""
-                trend_str = (
-                    f"{sign}{trend:,.0f} MW vs"
-                    " prior year"
-                )
-            elif len(monthly_res) >= 2:
-                trend = (
-                    monthly_res[
-                        "residual_load"
-                    ].iloc[-1]
-                    - monthly_res[
-                        "residual_load"
-                    ].iloc[0]
-                )
-                sign = "+" if trend >= 0 else ""
-                trend_str = (
-                    f"{sign}{trend:,.0f} MW"
-                    " (period change)"
-                )
-            else:
-                trend_str = "N/A"
-
-            # Negative residual hours by month
-            m["is_negative"] = (
-                m["residual_load"] < 0
+            avg_res = (
+                f"{merged['residual_load'].mean():,.0f}"
+                " MW"
             )
-            neg_by_month = (
-                m.groupby("month")["is_negative"]
-                .sum()
-                .reset_index()
+            neg_hours = int(
+                (merged["residual_load"] < 0).sum()
             )
-            total_neg = int(
-                neg_by_month["is_negative"].sum()
-            )
-            neg_str = str(total_neg)
+            neg_hours_str = str(neg_hours)
         else:
+            current_res = "N/A"
             avg_res = "N/A"
-            trend_str = "N/A"
-            neg_str = "N/A"
+            neg_hours_str = "N/A"
 
         if not flows_df.empty:
             net_flow = flows_df["flow_mw"].sum()
@@ -225,23 +191,23 @@ def register_callbacks(app):
             [
                 html.Div(
                     kpi_card(
+                        "Current Residual Load",
+                        current_res,
+                    ),
+                    style={"flex": "1"},
+                ),
+                html.Div(
+                    kpi_card(
                         "Avg Residual Load",
                         avg_res,
-                        "Monthly average",
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Residual Load Trend",
-                        trend_str,
-                    ),
-                    style={"flex": "1"},
-                ),
-                html.Div(
-                    kpi_card(
-                        "Negative Residual Hours",
-                        neg_str,
+                        "Negative Residual"
+                        " Intervals",
+                        neg_hours_str,
                         "Excess RE generation",
                     ),
                     style={"flex": "1"},
@@ -262,69 +228,65 @@ def register_callbacks(app):
             },
         )
 
-        # --- Chart 1: Monthly avg residual load trend ---
+        # Residual load curve
         if not merged.empty:
-            m = merged.copy()
-            m["month"] = m[
-                "timestamp"
-            ].dt.to_period("M")
-            monthly_res = (
-                m.groupby("month")
-                .agg(
-                    avg_residual=(
-                        "residual_load",
-                        "mean",
-                    ),
-                )
-                .reset_index()
-            )
-            monthly_res["month_str"] = monthly_res[
-                "month"
-            ].astype(str)
-
-            res_series = pd.Series(
-                monthly_res["avg_residual"].values
-            )
-            rolling_12 = res_series.rolling(
-                12, min_periods=1
-            ).mean()
-
             curve_fig = go.Figure()
             curve_fig.add_trace(
                 go.Scatter(
-                    x=monthly_res[
-                        "month_str"
-                    ].tolist(),
-                    y=monthly_res[
-                        "avg_residual"
-                    ].tolist(),
-                    mode="lines+markers",
-                    name="Monthly Avg",
+                    x=merged["timestamp"],
+                    y=merged["load_mw"],
+                    name="Total Load",
+                    mode="lines",
                     line=dict(
-                        color=COLORS["accent_cyan"],
-                        width=2,
+                        color=COLORS[
+                            "text_muted"
+                        ],
+                        width=1,
+                        dash="dot",
                     ),
-                    marker=dict(size=4),
                     hovertemplate=(
-                        "%{x}<br>"
-                        "%{y:,.0f} MW"
+                        "Load: %{y:,.0f} MW"
                         "<extra></extra>"
                     ),
                 )
             )
             curve_fig.add_trace(
                 go.Scatter(
-                    x=monthly_res[
-                        "month_str"
-                    ].tolist(),
-                    y=rolling_12.tolist(),
+                    x=merged["timestamp"],
+                    y=merged["renewable_mw"],
+                    name="Solar + Wind",
                     mode="lines",
-                    name="12M Rolling",
                     line=dict(
                         color=COLORS[
-                            "accent_amber"
+                            "accent_green"
+                        ],
+                        width=1.5,
+                    ),
+                    fill="tozeroy",
+                    fillcolor=(
+                        "rgba(16,185,129,0.1)"
+                    ),
+                    hovertemplate=(
+                        "RE: %{y:,.0f} MW"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+            curve_fig.add_trace(
+                go.Scatter(
+                    x=merged["timestamp"],
+                    y=merged["residual_load"],
+                    name="Residual Load",
+                    mode="lines",
+                    line=dict(
+                        color=COLORS[
+                            "accent_cyan"
                         ],
                         width=2.5,
+                    ),
+                    hovertemplate=(
+                        "Residual: %{y:,.0f} MW"
+                        "<extra></extra>"
                     ),
                 )
             )
@@ -338,23 +300,28 @@ def register_callbacks(app):
             curve_fig.update_layout(
                 title=dict(
                     text=(
-                        "Monthly Avg Residual Load"
-                        " (Structural Trend)"
+                        "Residual Load"
+                        " (Total Load"
+                        " - Solar - Wind)"
                     ),
                     font=dict(size=15),
                 ),
                 yaxis=dict(title="MW"),
+                hovermode="x unified",
                 legend=dict(
-                    orientation="h", y=-0.15
+                    orientation="h", y=-0.12
                 ),
             )
         else:
             curve_fig = _empty_figure(
-                "Residual Load Trend"
+                "Residual Load"
             )
 
-        # --- Chart 2: Residual vs price scatter ---
-        if not merged.empty and not prices_df.empty:
+        # Residual vs price scatter
+        if (
+            not merged.empty
+            and not prices_df.empty
+        ):
             scatter_merged = pd.merge_asof(
                 merged[
                     ["timestamp", "residual_load"]
@@ -378,99 +345,67 @@ def register_callbacks(app):
                 "Residual Load vs Price"
             )
 
-        # --- Chart 3: Monthly negative residual hours ---
-        if not merged.empty:
-            m = merged.copy()
-            m["month"] = m[
-                "timestamp"
-            ].dt.to_period("M")
-            m["is_negative"] = (
-                m["residual_load"] < 0
-            )
-            neg_monthly = (
-                m.groupby("month")["is_negative"]
-                .sum()
+        # Cross-border flows
+        if not flows_df.empty:
+            country_avg = (
+                flows_df.groupby("country")[
+                    "flow_mw"
+                ]
+                .mean()
+                .sort_values()
                 .reset_index()
             )
-            neg_monthly["month_str"] = neg_monthly[
-                "month"
-            ].astype(str)
-
-            neg_series = pd.Series(
-                neg_monthly["is_negative"].values,
-                dtype=float,
-            )
-            rolling_6 = neg_series.rolling(
-                6, min_periods=1
-            ).mean()
-
-            neg_fig = go.Figure()
-            neg_fig.add_trace(
+            colors = [
+                COLORS["accent_green"]
+                if v > 0
+                else COLORS["accent_red"]
+                for v in country_avg["flow_mw"]
+            ]
+            flows_fig = go.Figure(
                 go.Bar(
-                    x=neg_monthly[
-                        "month_str"
-                    ].tolist(),
-                    y=neg_monthly[
-                        "is_negative"
-                    ].tolist(),
-                    marker_color=COLORS[
-                        "accent_green"
-                    ],
+                    y=country_avg["country"],
+                    x=country_avg["flow_mw"],
+                    orientation="h",
+                    marker_color=colors,
                     marker_line_width=0,
-                    name="Monthly Count",
                     hovertemplate=(
-                        "%{x}<br>%{y} intervals"
+                        "%{y}: %{x:,.0f} MW"
                         "<extra></extra>"
                     ),
                 )
             )
-            neg_fig.add_trace(
-                go.Scatter(
-                    x=neg_monthly[
-                        "month_str"
-                    ].tolist(),
-                    y=rolling_6.tolist(),
-                    mode="lines",
-                    name="6M Trend",
-                    line=dict(
-                        color=COLORS[
-                            "accent_amber"
-                        ],
-                        width=2.5,
-                    ),
-                )
+            flows_fig.add_vline(
+                x=0,
+                line_color=COLORS["text_muted"],
+                line_width=1,
             )
-            apply_theme(neg_fig)
-            neg_fig.update_layout(
+            apply_theme(flows_fig)
+            flows_fig.update_layout(
                 title=dict(
                     text=(
-                        "Monthly Negative"
-                        " Residual Load Intervals"
+                        "Avg Cross-Border Flows"
+                        " (+ Export / - Import)"
                     ),
                     font=dict(size=15),
                 ),
-                yaxis=dict(title="Count"),
-                legend=dict(
-                    orientation="h", y=-0.15
-                ),
+                xaxis=dict(title="MW"),
+                height=300,
             )
         else:
-            neg_fig = _empty_figure(
-                "Negative Residual Hours"
+            flows_fig = _empty_figure(
+                "Cross-Border Flows"
             )
 
-        # --- Chart 4: Residual load heatmap (hour x month) ---
+        # Residual load heatmap
         if not merged.empty:
             m = merged.copy()
             m["hour"] = m["timestamp"].dt.hour
-            m["month"] = (
-                m["timestamp"]
-                .dt.to_period("M")
-                .astype(str)
-            )
+            m["date"] = m[
+                "timestamp"
+            ].dt.date.astype(str)
             pivot = m.pivot_table(
                 values="residual_load",
-                index="month",
+                index="date",
                 columns="hour",
                 aggfunc="mean",
             )
@@ -484,12 +419,13 @@ def register_callbacks(app):
             hm_fig = heatmap_chart(
                 z_data=pivot[existing].values,
                 x_labels=[
-                    f"{h:02d}:00" for h in existing
+                    f"{h:02d}:00"
+                    for h in existing
                 ],
                 y_labels=list(pivot.index),
                 title=(
                     "Residual Load Heatmap"
-                    " (MW by Hour & Month)"
+                    " (MW by Hour & Date)"
                 ),
                 colorscale="RdBu_r",
                 z_label="MW",
@@ -503,6 +439,6 @@ def register_callbacks(app):
             kpis,
             curve_fig,
             sc_fig,
-            neg_fig,
+            flows_fig,
             hm_fig,
         )

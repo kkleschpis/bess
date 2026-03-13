@@ -2,6 +2,11 @@
 REE API client for Spanish power market data.
 Data source: Red Electrica de Espana (https://apidatos.ree.es/)
 Public API — no authentication required.
+
+API constraints discovered:
+- Prices support time_trunc=hour
+- Generation, demand, flows support time_trunc=day (NOT hour)
+- Interconnection flows use /francia-frontera (not -fisicos)
 """
 
 import time
@@ -15,7 +20,7 @@ TIMEOUT = 30
 
 # Simple in-memory cache: {cache_key: (timestamp, data)}
 _cache: dict[str, tuple[float, object]] = {}
-CACHE_TTL = 300  # 5 minutes
+CACHE_TTL = 900  # 15 minutes — strategic data is less time-sensitive
 
 
 def _cache_key(endpoint: str, params: dict) -> str:
@@ -52,7 +57,10 @@ def _api_get(endpoint: str, params: dict) -> dict:
         "Content-Type": "application/json",
     }
     resp = requests.get(
-        url, params=params, headers=headers, timeout=TIMEOUT
+        url,
+        params=params,
+        headers=headers,
+        timeout=TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()
@@ -81,7 +89,8 @@ def fetch_day_ahead_prices(
         "time_trunc": "hour",
     }
     endpoint = (
-        "/en/datos/mercados/precios-mercados-tiempo-real"
+        "/en/datos/mercados"
+        "/precios-mercados-tiempo-real"
     )
     key = _cache_key(endpoint, params)
     cached = _get_cached(key)
@@ -97,16 +106,9 @@ def fetch_day_ahead_prices(
 
     rows = []
     for item in _parse_included(data):
-        # Look for PVPC or spot market price series
-        type_name = item.get("type", "")
-        if "spot" not in type_name.lower() and (
-            "precio" not in type_name.lower()
-            and "pvpc" not in type_name.lower()
-            and "mercado" not in type_name.lower()
-        ):
-            continue
         values = (
-            item.get("attributes", {}).get("values", [])
+            item.get("attributes", {})
+            .get("values", [])
         )
         for v in values:
             if v.get("value") is not None:
@@ -115,7 +117,7 @@ def fetch_day_ahead_prices(
                     "price_eur_mwh": v["value"],
                 })
         if rows:
-            break  # Use first matching series
+            break  # Use first series
 
     if not rows:
         return pd.DataFrame(
@@ -139,8 +141,15 @@ def fetch_day_ahead_prices(
 def fetch_generation_by_source(
     start: datetime | None = None,
     end: datetime | None = None,
+    time_trunc: str = "day",
 ) -> pd.DataFrame:
-    """Fetch generation data by source for Spain."""
+    """Fetch generation data by source for Spain.
+
+    Args:
+        start: Start datetime.
+        end: End datetime.
+        time_trunc: Time resolution — "day" or "month".
+    """
     if end is None:
         end = datetime.now()
     if start is None:
@@ -149,10 +158,11 @@ def fetch_generation_by_source(
     params = {
         "start_date": _format_dt(start),
         "end_date": _format_dt(end),
-        "time_trunc": "hour",
+        "time_trunc": time_trunc,
     }
     endpoint = (
-        "/en/datos/generacion/estructura-generacion"
+        "/en/datos/generacion"
+        "/estructura-generacion"
     )
     key = _cache_key(endpoint, params)
     cached = _get_cached(key)
@@ -164,43 +174,25 @@ def fetch_generation_by_source(
     except requests.HTTPError:
         return pd.DataFrame(columns=["timestamp"])
 
-    # Map REE source names to clean column names
+    # Map actual REE API source names
     source_map = {
-        "nuclear": "nuclear",
-        "wind": "wind",
-        "eólica": "wind",
-        "solar photovoltaic": "solar_pv",
-        "solar fotovoltaica": "solar_pv",
-        "solar thermal": "solar_thermal",
-        "solar térmica": "solar_thermal",
         "hydro": "hydro",
-        "hidráulica": "hydro",
-        "hydroelectric": "hydro",
-        "combined cycle": "combined_cycle",
-        "ciclo combinado": "combined_cycle",
+        "nuclear": "nuclear",
         "coal": "coal",
-        "carbón": "coal",
-        "cogeneration": "cogeneration",
-        "cogeneración": "cogeneration",
-        "waste": "waste",
-        "residuos": "waste",
-        "biomass": "biomass",
-        "biomasa": "biomass",
-        "fuel + gas": "gas",
-        "fuel/gas": "gas",
-        "oil": "oil",
-        "pumped hydro": "hydro_pumped",
-        "hydro pumped storage": "hydro_pumped",
-        "turbinación bombeo": "hydro_pumped",
+        "diesel engines": "oil",
+        "gas turbine": "gas",
+        "steam turbine": "gas",
+        "combined cycle": "combined_cycle",
+        "hydroeolian": "other",
+        "wind": "wind",
+        "solar photovoltaic": "solar_pv",
+        "thermal solar": "solar_thermal",
         "other renewables": "other",
-        "otras renovables": "other",
-        "renewable waste": "biomass",
+        "cogeneration": "cogeneration",
         "non-renewable waste": "waste",
-        "residuos renovables": "biomass",
-        "residuos no renovables": "waste",
+        "renewable waste": "biomass",
     }
 
-    # Collect all timestamps from the first series
     items = _parse_included(data)
     if not items:
         return pd.DataFrame(columns=["timestamp"])
@@ -216,6 +208,9 @@ def fetch_generation_by_source(
             .lower()
             .strip()
         )
+        # Skip the total row
+        if "total" in raw_name:
+            continue
         col_name = source_map.get(raw_name)
         if col_name is None:
             # Try partial matching
@@ -227,7 +222,8 @@ def fetch_generation_by_source(
             continue
 
         values = (
-            item.get("attributes", {}).get("values", [])
+            item.get("attributes", {})
+            .get("values", [])
         )
         for v in values:
             dt_str = v.get("datetime")
@@ -269,8 +265,15 @@ def fetch_generation_by_source(
 def fetch_total_load(
     start: datetime | None = None,
     end: datetime | None = None,
+    time_trunc: str = "day",
 ) -> pd.DataFrame:
-    """Fetch total electricity demand for Spain."""
+    """Fetch total electricity demand for Spain.
+
+    Args:
+        start: Start datetime.
+        end: End datetime.
+        time_trunc: Time resolution — "day" or "month".
+    """
     if end is None:
         end = datetime.now()
     if start is None:
@@ -279,7 +282,7 @@ def fetch_total_load(
     params = {
         "start_date": _format_dt(start),
         "end_date": _format_dt(end),
-        "time_trunc": "hour",
+        "time_trunc": time_trunc,
     }
     endpoint = "/en/datos/demanda/evolucion"
     key = _cache_key(endpoint, params)
@@ -296,20 +299,9 @@ def fetch_total_load(
 
     rows = []
     for item in _parse_included(data):
-        type_name = (
-            item.get("attributes", {})
-            .get("title", item.get("type", ""))
-            .lower()
-        )
-        # Look for demand/load series
-        if (
-            "demand" not in type_name
-            and "demanda" not in type_name
-            and "real" not in type_name
-        ):
-            continue
         values = (
-            item.get("attributes", {}).get("values", [])
+            item.get("attributes", {})
+            .get("values", [])
         )
         for v in values:
             if v.get("value") is not None:
@@ -318,7 +310,7 @@ def fetch_total_load(
                     "load_mw": v["value"],
                 })
         if rows:
-            break
+            break  # Use first series (Demand)
 
     if not rows:
         return pd.DataFrame(
@@ -344,14 +336,19 @@ def fetch_cross_border_flows(
     start: datetime | None = None,
     end: datetime | None = None,
     country: str = "all",
+    time_trunc: str = "day",
 ) -> pd.DataFrame:
     """Fetch cross-border electricity flows for Spain.
+
+    Uses the /frontera endpoints (not -fisicos).
+    Extracts the 'saldo' (balance) series.
 
     Args:
         start: Start datetime.
         end: End datetime.
         country: 'france', 'portugal', 'morocco', or
             'all' for all borders.
+        time_trunc: Time resolution — "day" or "month".
     """
     if end is None:
         end = datetime.now()
@@ -361,21 +358,23 @@ def fetch_cross_border_flows(
     border_endpoints = {
         "france": (
             "/en/datos/intercambios"
-            "/francia-frontera-fisicos"
+            "/francia-frontera"
         ),
         "portugal": (
             "/en/datos/intercambios"
-            "/portugal-frontera-fisicos"
+            "/portugal-frontera"
         ),
         "morocco": (
             "/en/datos/intercambios"
-            "/marruecos-frontera-fisicos"
+            "/marruecos-frontera"
         ),
     }
 
     if country != "all":
         endpoints = {
-            country: border_endpoints.get(country, "")
+            country: border_endpoints.get(
+                country, ""
+            )
         }
     else:
         endpoints = border_endpoints
@@ -383,7 +382,7 @@ def fetch_cross_border_flows(
     params = {
         "start_date": _format_dt(start),
         "end_date": _format_dt(end),
-        "time_trunc": "hour",
+        "time_trunc": time_trunc,
     }
 
     all_rows = []
@@ -402,7 +401,17 @@ def fetch_cross_border_flows(
             continue
 
         border_rows = []
+        # Look for the "saldo" (balance) series
         for item in _parse_included(data):
+            title = (
+                item.get("attributes", {})
+                .get(
+                    "title", item.get("type", "")
+                )
+                .lower()
+            )
+            if "saldo" not in title:
+                continue
             values = (
                 item.get("attributes", {})
                 .get("values", [])
@@ -414,14 +423,18 @@ def fetch_cross_border_flows(
                         "country": border_name.title(),
                         "flow_mw": v["value"],
                     })
-            if border_rows:
-                break
+            break
+
         _set_cache(key, border_rows)
         all_rows.extend(border_rows)
 
     if not all_rows:
         return pd.DataFrame(
-            columns=["timestamp", "country", "flow_mw"]
+            columns=[
+                "timestamp",
+                "country",
+                "flow_mw",
+            ]
         )
 
     df = pd.DataFrame(all_rows)
@@ -440,8 +453,15 @@ def fetch_cross_border_flows(
 def fetch_renewable_vs_nonrenewable(
     start: datetime | None = None,
     end: datetime | None = None,
+    time_trunc: str = "day",
 ) -> pd.DataFrame:
-    """Fetch renewable vs non-renewable generation."""
+    """Fetch renewable vs non-renewable generation.
+
+    Args:
+        start: Start datetime.
+        end: End datetime.
+        time_trunc: Time resolution — "day" or "month".
+    """
     if end is None:
         end = datetime.now()
     if start is None:
@@ -450,7 +470,7 @@ def fetch_renewable_vs_nonrenewable(
     params = {
         "start_date": _format_dt(start),
         "end_date": _format_dt(end),
-        "time_trunc": "hour",
+        "time_trunc": time_trunc,
     }
     endpoint = (
         "/en/datos/generacion"
@@ -479,7 +499,10 @@ def fetch_renewable_vs_nonrenewable(
             .get("title", item.get("type", ""))
             .lower()
         )
-        if "renew" in raw_name or "renovable" in raw_name:
+        if (
+            "renew" in raw_name
+            or "renovable" in raw_name
+        ):
             if (
                 "non" in raw_name
                 or "no " in raw_name
@@ -490,7 +513,8 @@ def fetch_renewable_vs_nonrenewable(
         else:
             continue
         values = (
-            item.get("attributes", {}).get("values", [])
+            item.get("attributes", {})
+            .get("values", [])
         )
         for v in values:
             if v.get("value") is not None:
@@ -510,10 +534,9 @@ def fetch_renewable_vs_nonrenewable(
             ]
         )
 
-    # Merge series
     dfs = []
-    for col, rows in series.items():
-        tmp = pd.DataFrame(rows)
+    for col, col_rows in series.items():
+        tmp = pd.DataFrame(col_rows)
         tmp["timestamp"] = pd.to_datetime(
             tmp["timestamp"], utc=True
         )

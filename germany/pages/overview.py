@@ -1,23 +1,26 @@
-"""Tab 1: Market Overview — current snapshot of the German power market."""
-
-from datetime import datetime, timedelta
+"""Tab 1: Strategic Overview — multi-year KPIs and headline trends."""
 
 import pandas as pd
-from dash import Input, Output, callback, dcc, html
+import plotly.graph_objects as go
+from dash import Input, Output, dcc, html
 
 from components.charts import (
-    generation_stacked_area,
-    line_chart,
-    price_bar_chart,
+    _empty_figure,
+    monthly_bar_with_rolling_avg,
 )
 from components.kpi_cards import kpi_card
-from components.theme import COLORS, apply_theme, card_style
+from components.theme import (
+    COLORS,
+    SOURCE_COLORS,
+    apply_theme,
+    card_style,
+)
 from data.api_client import (
     fetch_day_ahead_prices,
     fetch_generation_by_source,
-    fetch_total_load,
+    fetch_installed_capacity_timeseries,
+    fetch_monthly_prices,
 )
-import plotly.graph_objects as go
 
 
 def layout():
@@ -29,38 +32,64 @@ def layout():
                     html.Div(
                         dcc.Graph(
                             id="overview-price-chart",
-                            config={"displayModeBar": False},
+                            config={
+                                "displayModeBar": False
+                            },
                         ),
-                        style={**card_style(), "flex": "1"},
+                        style={
+                            **card_style(),
+                            "flex": "1",
+                        },
                     ),
                     html.Div(
                         dcc.Graph(
                             id="overview-gen-chart",
-                            config={"displayModeBar": False},
+                            config={
+                                "displayModeBar": False
+                            },
                         ),
-                        style={**card_style(), "flex": "1"},
+                        style={
+                            **card_style(),
+                            "flex": "1",
+                        },
                     ),
                 ],
-                style={"display": "flex", "gap": "16px"},
+                style={
+                    "display": "flex",
+                    "gap": "16px",
+                },
             ),
             html.Div(
                 [
                     html.Div(
                         dcc.Graph(
                             id="overview-residual-chart",
-                            config={"displayModeBar": False},
+                            config={
+                                "displayModeBar": False
+                            },
                         ),
-                        style={**card_style(), "flex": "1"},
+                        style={
+                            **card_style(),
+                            "flex": "1",
+                        },
                     ),
                     html.Div(
                         dcc.Graph(
                             id="overview-trend-chart",
-                            config={"displayModeBar": False},
+                            config={
+                                "displayModeBar": False
+                            },
                         ),
-                        style={**card_style(), "flex": "1"},
+                        style={
+                            **card_style(),
+                            "flex": "1",
+                        },
                     ),
                 ],
-                style={"display": "flex", "gap": "16px"},
+                style={
+                    "display": "flex",
+                    "gap": "16px",
+                },
             ),
         ]
     )
@@ -72,7 +101,9 @@ def register_callbacks(app):
             Output("overview-kpis", "children"),
             Output("overview-price-chart", "figure"),
             Output("overview-gen-chart", "figure"),
-            Output("overview-residual-chart", "figure"),
+            Output(
+                "overview-residual-chart", "figure"
+            ),
             Output("overview-trend-chart", "figure"),
         ],
         [
@@ -81,105 +112,152 @@ def register_callbacks(app):
         ],
     )
     def update_overview(start_date, end_date):
-        start = pd.Timestamp(start_date)
-        end = pd.Timestamp(end_date)
-        start_dt = start.to_pydatetime()
-        end_dt = end.to_pydatetime()
+        start = pd.Timestamp(start_date).to_pydatetime()
+        end = pd.Timestamp(end_date).to_pydatetime()
 
-        prices = fetch_day_ahead_prices(start_dt, end_dt)
-        gen = fetch_generation_by_source(start_dt, end_dt)
-        load = fetch_total_load(start_dt, end_dt)
+        monthly = fetch_monthly_prices(start, end)
+        cap_ts = fetch_installed_capacity_timeseries()
 
-        # KPIs
-        if not prices.empty:
-            current_price = (
-                f"{prices['price_eur_mwh'].iloc[-1]:.1f}"
+        # --- KPIs ---
+        # Solar/Wind/BESS installed capacity
+        current_year = pd.Timestamp.now().year
+        cap_current = cap_ts[
+            cap_ts["year"] == current_year
+        ]
+        cap_prev = cap_ts[
+            cap_ts["year"] == current_year - 1
+        ]
+
+        def _cap_kpi(source_name):
+            cur = cap_current[
+                cap_current["source"] == source_name
+            ]["capacity_gw"]
+            prev = cap_prev[
+                cap_prev["source"] == source_name
+            ]["capacity_gw"]
+            cur_val = (
+                cur.iloc[0] if len(cur) > 0 else 0
             )
-            price_min = f"{prices['price_eur_mwh'].min():.1f}"
-            price_max = f"{prices['price_eur_mwh'].max():.1f}"
-            price_range = f"{price_min} / {price_max}"
+            prev_val = (
+                prev.iloc[0] if len(prev) > 0 else 0
+            )
+            delta = cur_val - prev_val
+            sign = "+" if delta >= 0 else ""
+            return (
+                f"{cur_val:.1f} GW",
+                f"YoY: {sign}{delta:.1f} GW",
+            )
+
+        solar_val, solar_delta = _cap_kpi("solar")
+        wind_on_val, _ = _cap_kpi("wind_onshore")
+        wind_off_val, _ = _cap_kpi("wind_offshore")
+
+        # Combine wind
+        wind_on_cur = cap_current[
+            cap_current["source"] == "wind_onshore"
+        ]["capacity_gw"]
+        wind_off_cur = cap_current[
+            cap_current["source"] == "wind_offshore"
+        ]["capacity_gw"]
+        wind_on_prev = cap_prev[
+            cap_prev["source"] == "wind_onshore"
+        ]["capacity_gw"]
+        wind_off_prev = cap_prev[
+            cap_prev["source"] == "wind_offshore"
+        ]["capacity_gw"]
+        wind_cur = (
+            (
+                wind_on_cur.iloc[0]
+                if len(wind_on_cur) > 0
+                else 0
+            )
+            + (
+                wind_off_cur.iloc[0]
+                if len(wind_off_cur) > 0
+                else 0
+            )
+        )
+        wind_prev = (
+            (
+                wind_on_prev.iloc[0]
+                if len(wind_on_prev) > 0
+                else 0
+            )
+            + (
+                wind_off_prev.iloc[0]
+                if len(wind_off_prev) > 0
+                else 0
+            )
+        )
+        wind_delta = wind_cur - wind_prev
+        wind_sign = "+" if wind_delta >= 0 else ""
+        wind_val = f"{wind_cur:.1f} GW"
+        wind_delta_str = (
+            f"YoY: {wind_sign}{wind_delta:.1f} GW"
+        )
+
+        bess_val, bess_delta = _cap_kpi(
+            "battery_storage"
+        )
+
+        # Trailing 12m avg price
+        if not monthly.empty and len(monthly) >= 2:
+            trail_12 = monthly.tail(12)[
+                "avg_price"
+            ].mean()
+            if len(monthly) >= 24:
+                prior_12 = monthly.iloc[-24:-12][
+                    "avg_price"
+                ].mean()
+                price_yoy = trail_12 - prior_12
+                sign = "+" if price_yoy >= 0 else ""
+                price_sub = (
+                    f"vs prior 12m:"
+                    f" {sign}{price_yoy:.1f}"
+                )
+            else:
+                price_sub = "Trailing 12 months"
+            price_str = f"{trail_12:.1f} EUR/MWh"
         else:
-            current_price = "N/A"
-            price_range = "N/A"
-
-        wind_solar_avg = "N/A"
-        if not gen.empty:
-            ws_cols = [
-                c
-                for c in [
-                    "solar",
-                    "wind_onshore",
-                    "wind_offshore",
-                ]
-                if c in gen.columns
-            ]
-            if ws_cols:
-                avg_ws = gen[ws_cols].sum(axis=1).mean()
-                wind_solar_avg = f"{avg_ws:,.0f} MW"
-
-        residual_val = "N/A"
-        if not load.empty and not gen.empty:
-            merged = pd.merge_asof(
-                load.sort_values("timestamp"),
-                gen[
-                    ["timestamp"]
-                    + [
-                        c
-                        for c in [
-                            "solar",
-                            "wind_onshore",
-                            "wind_offshore",
-                        ]
-                        if c in gen.columns
-                    ]
-                ].sort_values("timestamp"),
-                on="timestamp",
-                direction="nearest",
-            )
-            ws = [
-                c
-                for c in [
-                    "solar",
-                    "wind_onshore",
-                    "wind_offshore",
-                ]
-                if c in merged.columns
-            ]
-            merged["residual"] = (
-                merged["load_mw"] - merged[ws].sum(axis=1)
-            )
-            residual_val = (
-                f"{merged['residual'].iloc[-1]:,.0f} MW"
-            )
+            price_str = "N/A"
+            price_sub = ""
 
         kpis = html.Div(
             [
                 html.Div(
                     kpi_card(
-                        "Current DA Price",
-                        f"{current_price} EUR/MWh",
+                        "Installed Solar",
+                        solar_val,
+                        solar_delta,
+                        color=SOURCE_COLORS["solar"],
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Price Range (Min/Max)",
-                        price_range,
-                        "EUR/MWh",
+                        "Installed Wind",
+                        wind_val,
+                        wind_delta_str,
+                        color=SOURCE_COLORS[
+                            "wind_onshore"
+                        ],
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Avg Wind + Solar",
-                        wind_solar_avg,
+                        "Installed BESS",
+                        bess_val,
+                        bess_delta,
+                        color=COLORS["accent_cyan"],
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Residual Load",
-                        residual_val,
+                        "Avg DA Price (12m)",
+                        price_str,
+                        price_sub,
                     ),
                     style={"flex": "1"},
                 ),
@@ -191,119 +269,271 @@ def register_callbacks(app):
             },
         )
 
-        # Today's price chart
-        today = datetime.now().date()
-        today_prices = prices[
-            prices["timestamp"].dt.date == today
-        ]
-        if today_prices.empty:
-            today_prices = prices.tail(24)
-        price_fig = price_bar_chart(
-            today_prices, "Today's Day-Ahead Prices"
-        )
-
-        # Generation stacked area (last 24h subset)
-        gen_24h = gen.tail(96)  # 96 x 15min = 24h
-        gen_fig = generation_stacked_area(
-            gen_24h, "Generation Mix (Last 24h)"
-        )
-
-        # Residual load chart
-        if not load.empty and not gen.empty:
-            merged = pd.merge_asof(
-                load.sort_values("timestamp"),
-                gen[
-                    ["timestamp"]
-                    + [
-                        c
-                        for c in [
-                            "solar",
-                            "wind_onshore",
-                            "wind_offshore",
-                        ]
-                        if c in gen.columns
-                    ]
-                ].sort_values("timestamp"),
-                on="timestamp",
-                direction="nearest",
+        # --- Chart 1: Monthly avg DA price ---
+        if not monthly.empty:
+            price_fig = monthly_bar_with_rolling_avg(
+                x=monthly["month_str"],
+                y=monthly["avg_price"],
+                title="Monthly Avg DA Price",
+                y_title="EUR/MWh",
+                bar_color=COLORS["accent_blue"],
+                rolling_windows=[
+                    (
+                        12,
+                        "12M Rolling Avg",
+                        COLORS["accent_amber"],
+                    ),
+                ],
             )
-            ws = [
+        else:
+            price_fig = _empty_figure(
+                "Monthly Avg DA Price"
+            )
+
+        # --- Chart 2: Monthly renewable share ---
+        gen = fetch_generation_by_source(start, end)
+        if not gen.empty:
+            gen_c = gen.copy()
+            gen_c["month"] = gen_c[
+                "timestamp"
+            ].dt.to_period("M")
+            source_cols = [
+                c
+                for c in gen_c.columns
+                if c not in ("timestamp", "month")
+            ]
+            monthly_gen = (
+                gen_c.groupby("month")[source_cols]
+                .sum()
+                .reset_index()
+            )
+            re_cols = [
                 c
                 for c in [
                     "solar",
                     "wind_onshore",
                     "wind_offshore",
                 ]
-                if c in merged.columns
+                if c in monthly_gen.columns
             ]
-            merged["residual_load"] = (
-                merged["load_mw"] - merged[ws].sum(axis=1)
+            monthly_gen["total"] = monthly_gen[
+                source_cols
+            ].sum(axis=1)
+            monthly_gen["re_total"] = monthly_gen[
+                re_cols
+            ].sum(axis=1)
+            monthly_gen["re_share"] = (
+                monthly_gen["re_total"]
+                / monthly_gen["total"]
+                * 100
             )
-            merged_24h = merged.tail(96)
+            monthly_gen["month_str"] = monthly_gen[
+                "month"
+            ].astype(str)
 
-            res_fig = go.Figure()
-            res_fig.add_trace(
+            re_series = pd.Series(
+                monthly_gen["re_share"].values
+            )
+            rolling_12 = re_series.rolling(
+                12, min_periods=1
+            ).mean()
+
+            gen_fig = go.Figure()
+            gen_fig.add_trace(
                 go.Scatter(
-                    x=merged_24h["timestamp"],
-                    y=merged_24h["residual_load"],
-                    mode="lines",
-                    fill="tozeroy",
+                    x=monthly_gen[
+                        "month_str"
+                    ].tolist(),
+                    y=monthly_gen[
+                        "re_share"
+                    ].tolist(),
+                    mode="lines+markers",
+                    name="Monthly RE Share",
                     line=dict(
-                        color=COLORS["accent_cyan"],
+                        color=COLORS["accent_green"],
                         width=2,
                     ),
-                    fillcolor="rgba(6, 182, 212, 0.15)",
+                    marker=dict(size=4),
                     hovertemplate=(
-                        "%{x|%H:%M}<br>"
-                        "%{y:,.0f} MW<extra></extra>"
+                        "%{x}<br>"
+                        "%{y:.1f}%<extra></extra>"
                     ),
                 )
             )
-            # Highlight negative residual (excess renewables)
-            neg = merged_24h[
-                merged_24h["residual_load"] < 0
+            gen_fig.add_trace(
+                go.Scatter(
+                    x=monthly_gen[
+                        "month_str"
+                    ].tolist(),
+                    y=rolling_12.tolist(),
+                    mode="lines",
+                    name="12M Trend",
+                    line=dict(
+                        color=COLORS["accent_amber"],
+                        width=2.5,
+                        dash="dash",
+                    ),
+                )
+            )
+            apply_theme(gen_fig)
+            gen_fig.update_layout(
+                title=dict(
+                    text="Monthly Renewable Share (%)",
+                    font=dict(size=15),
+                ),
+                yaxis=dict(title="%"),
+                legend=dict(
+                    orientation="h", y=-0.15
+                ),
+            )
+        else:
+            gen_fig = _empty_figure(
+                "Monthly Renewable Share"
+            )
+
+        # --- Chart 3: Monthly peak/off-peak spread ---
+        if not monthly.empty:
+            spread_fig = monthly_bar_with_rolling_avg(
+                x=monthly["month_str"],
+                y=monthly["spread"],
+                title=(
+                    "Monthly Avg Peak/Off-Peak Spread"
+                ),
+                y_title="EUR/MWh",
+                bar_color=COLORS["accent_amber"],
+                rolling_windows=[
+                    (
+                        6,
+                        "6M Rolling",
+                        COLORS["accent_cyan"],
+                    ),
+                ],
+            )
+        else:
+            spread_fig = _empty_figure(
+                "Peak/Off-Peak Spread"
+            )
+
+        # --- Chart 4: Installed capacity trajectory ---
+        if not cap_ts.empty:
+            key_sources = [
+                "solar",
+                "wind_onshore",
+                "wind_offshore",
+                "battery_storage",
             ]
-            if not neg.empty:
-                res_fig.add_trace(
+            cap_chart = cap_ts[
+                (cap_ts["source"].isin(key_sources))
+                & (cap_ts["year"] >= 2015)
+            ].copy()
+
+            source_colors = {
+                "solar": SOURCE_COLORS["solar"],
+                "wind_onshore": SOURCE_COLORS[
+                    "wind_onshore"
+                ],
+                "wind_offshore": SOURCE_COLORS[
+                    "wind_offshore"
+                ],
+                "battery_storage": COLORS[
+                    "accent_cyan"
+                ],
+            }
+            source_labels = {
+                "solar": "Solar",
+                "wind_onshore": "Wind Onshore",
+                "wind_offshore": "Wind Offshore",
+                "battery_storage": "Battery Storage",
+            }
+
+            cap_fig = go.Figure()
+            for src in key_sources:
+                src_data = cap_chart[
+                    cap_chart["source"] == src
+                ].sort_values("year")
+                if src_data.empty:
+                    continue
+                cap_fig.add_trace(
                     go.Scatter(
-                        x=neg["timestamp"],
-                        y=neg["residual_load"],
-                        mode="markers",
-                        marker=dict(
-                            color=COLORS["accent_green"],
-                            size=5,
+                        x=src_data["year"],
+                        y=src_data["capacity_gw"],
+                        name=source_labels.get(
+                            src, src
                         ),
-                        name="Charge Zone",
+                        mode="lines",
+                        line=dict(width=0),
+                        fillcolor=source_colors.get(
+                            src,
+                            COLORS["accent_blue"],
+                        ),
+                        stackgroup="cap",
                         hovertemplate=(
-                            "Charge: %{y:,.0f} MW"
+                            f"{source_labels.get(src, src)}"
+                            ": %{y:.1f} GW"
                             "<extra></extra>"
                         ),
                     )
                 )
-            apply_theme(res_fig)
-            res_fig.update_layout(
+
+            # EEG 2023 target markers
+            eeg_targets = {
+                2030: {
+                    "solar": 215,
+                    "wind_onshore": 115,
+                    "wind_offshore": 30,
+                },
+            }
+            for year, targets in eeg_targets.items():
+                total_target = sum(targets.values())
+                cap_fig.add_trace(
+                    go.Scatter(
+                        x=[year],
+                        y=[total_target],
+                        mode="markers",
+                        marker=dict(
+                            symbol="star",
+                            size=14,
+                            color=COLORS[
+                                "accent_red"
+                            ],
+                            line=dict(
+                                width=1,
+                                color=COLORS["text"],
+                            ),
+                        ),
+                        name=f"EEG {year} Target",
+                        hovertemplate=(
+                            f"EEG {year}:"
+                            f" {total_target} GW"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+            apply_theme(cap_fig)
+            cap_fig.update_layout(
                 title=dict(
-                    text="Residual Load (Last 24h)",
+                    text=(
+                        "Installed Capacity Trajectory"
+                        " (2015-2030)"
+                    ),
                     font=dict(size=15),
                 ),
-                yaxis=dict(title="MW"),
-                showlegend=False,
+                yaxis=dict(title="GW"),
+                hovermode="x unified",
+                legend=dict(
+                    orientation="h", y=-0.15
+                ),
             )
         else:
-            from components.charts import (
-                _empty_figure,
+            cap_fig = _empty_figure(
+                "Installed Capacity"
             )
 
-            res_fig = _empty_figure("Residual Load")
-
-        # 7-day price trend
-        trend_fig = line_chart(
-            prices,
-            "timestamp",
-            "price_eur_mwh",
-            title="Price Trend",
-            y_title="EUR/MWh",
-            color=COLORS["accent_blue"],
+        return (
+            kpis,
+            price_fig,
+            gen_fig,
+            spread_fig,
+            cap_fig,
         )
-
-        return kpis, price_fig, gen_fig, res_fig, trend_fig

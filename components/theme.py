@@ -55,6 +55,9 @@ SOURCE_COLORS = {
     "wind": "#3b82f6",
     "solar_pv": "#f59e0b",
     "solar_thermal": "#d97706",
+    # France-specific
+    "hydro_run_of_river": "#2563eb",
+    "hydro_reservoir": "#1e40af",
 }
 
 # Human-readable labels for sources (Germany + Spain)
@@ -82,6 +85,9 @@ SOURCE_LABELS = {
     "wind": "Wind",
     "solar_pv": "Solar PV",
     "solar_thermal": "Solar Thermal",
+    # France-specific
+    "hydro_run_of_river": "Hydro Run-of-River",
+    "hydro_reservoir": "Hydro Reservoir",
 }
 
 PLOT_LAYOUT = dict(

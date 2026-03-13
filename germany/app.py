@@ -1,6 +1,6 @@
 """
 BW ESS — German Power Market Dashboard
-Live German electricity market data for trading and dispatch decisions.
+Strategic market analysis for BESS investment decisions.
 Data source: Fraunhofer ISE Energy-Charts API.
 """
 
@@ -25,16 +25,18 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
 )
 
-# Default date range: last 7 days
+# Default date range: last 1 year
 today = datetime.now().date()
-default_start = today - timedelta(days=7)
+default_start = today - timedelta(days=365)
 default_end = today + timedelta(days=1)
 
 TAB_STYLE = {
     "backgroundColor": COLORS["card"],
     "color": COLORS["text_muted"],
     "border": "none",
-    "borderBottom": f"2px solid {COLORS['card_border']}",
+    "borderBottom": (
+        f"2px solid {COLORS['card_border']}"
+    ),
     "padding": "10px 20px",
     "fontWeight": "500",
     "fontSize": "13px",
@@ -43,7 +45,9 @@ TAB_STYLE = {
 TAB_SELECTED_STYLE = {
     **TAB_STYLE,
     "color": COLORS["text"],
-    "borderBottom": f"2px solid {COLORS['accent_blue']}",
+    "borderBottom": (
+        f"2px solid {COLORS['accent_blue']}"
+    ),
 }
 
 PRESET_BUTTON_STYLE = {
@@ -74,8 +78,7 @@ app.layout = html.Div(
                             },
                         ),
                         html.Div(
-                            "Live Market Data \u2022 "
-                            "Trading & Dispatch Dashboard",
+                            "Strategic Market Analysis",
                             style={
                                 "color": COLORS[
                                     "text_muted"
@@ -105,32 +108,32 @@ app.layout = html.Div(
                 ),
             },
         ),
-        # Controls bar: date range + presets + refresh
+        # Controls bar: date range + presets
         html.Div(
             [
                 html.Div(
                     [
                         html.Button(
-                            "Today",
-                            id="preset-today",
-                            n_clicks=0,
-                            style=PRESET_BUTTON_STYLE,
-                        ),
-                        html.Button(
-                            "7D",
-                            id="preset-7d",
-                            n_clicks=0,
-                            style=PRESET_BUTTON_STYLE,
-                        ),
-                        html.Button(
-                            "30D",
-                            id="preset-30d",
-                            n_clicks=0,
-                            style=PRESET_BUTTON_STYLE,
-                        ),
-                        html.Button(
                             "90D",
                             id="preset-90d",
+                            n_clicks=0,
+                            style=PRESET_BUTTON_STYLE,
+                        ),
+                        html.Button(
+                            "1Y",
+                            id="preset-1y",
+                            n_clicks=0,
+                            style=PRESET_BUTTON_STYLE,
+                        ),
+                        html.Button(
+                            "2Y",
+                            id="preset-2y",
+                            n_clicks=0,
+                            style=PRESET_BUTTON_STYLE,
+                        ),
+                        html.Button(
+                            "5Y",
+                            id="preset-5y",
                             n_clicks=0,
                             style=PRESET_BUTTON_STYLE,
                         ),
@@ -163,7 +166,9 @@ app.layout = html.Div(
                             id="date-start",
                             date=default_start.isoformat(),
                             display_format="YYYY-MM-DD",
-                            style={"marginRight": "12px"},
+                            style={
+                                "marginRight": "12px"
+                            },
                         ),
                         html.Label(
                             "To:",
@@ -184,29 +189,7 @@ app.layout = html.Div(
                     style={
                         "display": "flex",
                         "alignItems": "center",
-                        "marginRight": "16px",
                     },
-                ),
-                html.Div(
-                    [
-                        dcc.Checklist(
-                            id="auto-refresh",
-                            options=[
-                                {
-                                    "label": " Auto-refresh"
-                                    " (5 min)",
-                                    "value": "on",
-                                },
-                            ],
-                            value=[],
-                            style={
-                                "color": COLORS[
-                                    "text_muted"
-                                ],
-                                "fontSize": "12px",
-                            },
-                        ),
-                    ],
                 ),
             ],
             style={
@@ -219,37 +202,31 @@ app.layout = html.Div(
                 "backgroundColor": COLORS["card"],
             },
         ),
-        # Auto-refresh interval
-        dcc.Interval(
-            id="refresh-interval",
-            interval=5 * 60 * 1000,  # 5 min
-            disabled=True,
-        ),
         # Tabs
         dcc.Tabs(
             id="main-tabs",
             value="overview",
             children=[
                 dcc.Tab(
-                    label="Market Overview",
+                    label="Strategic Overview",
                     value="overview",
                     style=TAB_STYLE,
                     selected_style=TAB_SELECTED_STYLE,
                 ),
                 dcc.Tab(
-                    label="Price Analysis",
+                    label="Price Regime",
                     value="prices",
                     style=TAB_STYLE,
                     selected_style=TAB_SELECTED_STYLE,
                 ),
                 dcc.Tab(
-                    label="Generation Mix",
+                    label="Capacity & Generation",
                     value="generation",
                     style=TAB_STYLE,
                     selected_style=TAB_SELECTED_STYLE,
                 ),
                 dcc.Tab(
-                    label="BESS Arbitrage",
+                    label="BESS Business Case",
                     value="bess",
                     style=TAB_STYLE,
                     selected_style=TAB_SELECTED_STYLE,
@@ -261,7 +238,7 @@ app.layout = html.Div(
                     selected_style=TAB_SELECTED_STYLE,
                 ),
                 dcc.Tab(
-                    label="Residual Load",
+                    label="Residual Load Structural",
                     value="residual",
                     style=TAB_STYLE,
                     selected_style=TAB_SELECTED_STYLE,
@@ -312,52 +289,44 @@ def render_tab(tab):
 
 
 @app.callback(
-    Output("refresh-interval", "disabled"),
-    Input("auto-refresh", "value"),
-)
-def toggle_refresh(value):
-    return "on" not in (value or [])
-
-
-@app.callback(
     [
         Output("date-start", "date"),
         Output("date-end", "date"),
     ],
     [
-        Input("preset-today", "n_clicks"),
-        Input("preset-7d", "n_clicks"),
-        Input("preset-30d", "n_clicks"),
         Input("preset-90d", "n_clicks"),
+        Input("preset-1y", "n_clicks"),
+        Input("preset-2y", "n_clicks"),
+        Input("preset-5y", "n_clicks"),
         Input("preset-ytd", "n_clicks"),
     ],
     prevent_initial_call=True,
 )
 def apply_preset(
-    today_clicks,
-    seven_clicks,
-    thirty_clicks,
     ninety_clicks,
+    one_y_clicks,
+    two_y_clicks,
+    five_y_clicks,
     ytd_clicks,
 ):
     ctx = dash.callback_context
     if not ctx.triggered:
         return dash.no_update, dash.no_update
 
-    button_id = ctx.triggered[0]["prop_id"].split(".")[
-        0
-    ]
+    button_id = ctx.triggered[0]["prop_id"].split(
+        "."
+    )[0]
     now = datetime.now().date()
     end = now + timedelta(days=1)
 
-    if button_id == "preset-today":
-        start = now
-    elif button_id == "preset-7d":
-        start = now - timedelta(days=7)
-    elif button_id == "preset-30d":
-        start = now - timedelta(days=30)
-    elif button_id == "preset-90d":
+    if button_id == "preset-90d":
         start = now - timedelta(days=90)
+    elif button_id == "preset-1y":
+        start = now - timedelta(days=365)
+    elif button_id == "preset-2y":
+        start = now - timedelta(days=730)
+    elif button_id == "preset-5y":
+        start = now - timedelta(days=1826)
     elif button_id == "preset-ytd":
         start = now.replace(month=1, day=1)
     else:
@@ -376,6 +345,9 @@ residual_load.register_callbacks(app)
 
 
 if __name__ == "__main__":
-    print("\n  BW ESS — German Power Market Dashboard")
+    print(
+        "\n  BW ESS — German Power Market"
+        " (Strategic Analysis)"
+    )
     print("  http://localhost:8051\n")
     app.run(debug=True, port=8051)

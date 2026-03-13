@@ -300,6 +300,70 @@ def bar_chart(
     return fig
 
 
+def monthly_bar_with_rolling_avg(
+    x,
+    y,
+    title="",
+    y_title="",
+    bar_color=None,
+    rolling_windows=None,
+):
+    """Monthly bar chart with optional rolling average overlays.
+
+    Args:
+        x: Month labels (list/array).
+        y: Values (list/array).
+        title: Chart title.
+        y_title: Y-axis label.
+        bar_color: Bar fill color.
+        rolling_windows: List of (window_size, label, color)
+            tuples for rolling average lines.
+    """
+    if len(x) == 0:
+        return _empty_figure(title)
+
+    import pandas as pd
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=list(x),
+            y=list(y),
+            marker_color=bar_color
+            or COLORS["accent_blue"],
+            marker_line_width=0,
+            name="Monthly",
+            hovertemplate=(
+                "%{x}<br>%{y:.1f}<extra></extra>"
+            ),
+        )
+    )
+
+    if rolling_windows:
+        series = pd.Series(list(y))
+        for window, label, color in rolling_windows:
+            rolling = series.rolling(
+                window, min_periods=1
+            ).mean()
+            fig.add_trace(
+                go.Scatter(
+                    x=list(x),
+                    y=rolling.tolist(),
+                    mode="lines",
+                    name=label,
+                    line=dict(color=color, width=2.5),
+                )
+            )
+
+    apply_theme(fig)
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=15)),
+        yaxis=dict(title=y_title),
+        legend=dict(orientation="h", y=-0.15),
+    )
+    return fig
+
+
 def _empty_figure(title="No Data"):
     """Return an empty themed figure with a message."""
     fig = go.Figure()

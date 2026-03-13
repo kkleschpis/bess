@@ -1,19 +1,17 @@
-"""Tab 4: BESS Business Case — long-term spread derivatives and saturation."""
+"""Tab 4: BESS Arbitrage & Revenue — spread analysis for France."""
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, dcc, html
 
 from components.charts import (
     _empty_figure,
-    monthly_bar_with_rolling_avg,
+    heatmap_chart,
 )
 from components.kpi_cards import kpi_card
 from components.theme import COLORS, apply_theme, card_style
-from data.api_client import (
-    fetch_installed_capacity_timeseries,
-    fetch_monthly_prices,
-)
+from data.api_client import fetch_day_ahead_prices
 
 
 def layout():
@@ -33,7 +31,7 @@ def layout():
                         },
                     ),
                     dcc.Input(
-                        id="bess-mw",
+                        id="fr-bess-mw",
                         type="number",
                         value=10,
                         min=1,
@@ -72,7 +70,7 @@ def layout():
                         },
                     ),
                     dcc.Dropdown(
-                        id="bess-duration",
+                        id="fr-bess-duration",
                         options=[
                             {
                                 "label": "1h",
@@ -114,7 +112,7 @@ def layout():
                         },
                     ),
                     dcc.Slider(
-                        id="bess-efficiency",
+                        id="fr-bess-efficiency",
                         min=70,
                         max=95,
                         step=1,
@@ -148,12 +146,12 @@ def layout():
     return html.Div(
         [
             controls,
-            html.Div(id="bess-kpis"),
+            html.Div(id="fr-bess-kpis"),
             html.Div(
                 [
                     html.Div(
                         dcc.Graph(
-                            id="bess-spread-chart",
+                            id="fr-bess-spread-chart",
                             config={
                                 "displayModeBar": False
                             },
@@ -165,7 +163,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="bess-revenue-chart",
+                            id="fr-bess-revenue-chart",
                             config={
                                 "displayModeBar": False
                             },
@@ -185,7 +183,7 @@ def layout():
                 [
                     html.Div(
                         dcc.Graph(
-                            id="bess-volatility-chart",
+                            id="fr-bess-volatility-chart",
                             config={
                                 "displayModeBar": False
                             },
@@ -197,7 +195,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="bess-optimal-chart",
+                            id="fr-bess-optimal-chart",
                             config={
                                 "displayModeBar": False
                             },
@@ -215,8 +213,10 @@ def layout():
             ),
             html.Div(
                 dcc.Graph(
-                    id="bess-monthly-chart",
-                    config={"displayModeBar": False},
+                    id="fr-bess-monthly-chart",
+                    config={
+                        "displayModeBar": False
+                    },
                 ),
                 style=card_style(),
             ),
@@ -227,21 +227,30 @@ def layout():
 def register_callbacks(app):
     @app.callback(
         [
-            Output("bess-kpis", "children"),
-            Output("bess-spread-chart", "figure"),
-            Output("bess-revenue-chart", "figure"),
+            Output("fr-bess-kpis", "children"),
             Output(
-                "bess-volatility-chart", "figure"
+                "fr-bess-spread-chart", "figure"
             ),
-            Output("bess-optimal-chart", "figure"),
-            Output("bess-monthly-chart", "figure"),
+            Output(
+                "fr-bess-revenue-chart", "figure"
+            ),
+            Output(
+                "fr-bess-volatility-chart",
+                "figure",
+            ),
+            Output(
+                "fr-bess-optimal-chart", "figure"
+            ),
+            Output(
+                "fr-bess-monthly-chart", "figure"
+            ),
         ],
         [
             Input("date-start", "date"),
             Input("date-end", "date"),
-            Input("bess-mw", "value"),
-            Input("bess-duration", "value"),
-            Input("bess-efficiency", "value"),
+            Input("fr-bess-mw", "value"),
+            Input("fr-bess-duration", "value"),
+            Input("fr-bess-efficiency", "value"),
         ],
     )
     def update_bess(
@@ -255,43 +264,40 @@ def register_callbacks(app):
             start_date
         ).to_pydatetime()
         end = pd.Timestamp(end_date).to_pydatetime()
-        monthly = fetch_monthly_prices(start, end)
-        cap_ts = fetch_installed_capacity_timeseries()
+        df = fetch_day_ahead_prices(start, end)
 
         mw = mw or 10
         duration = duration or 2
         efficiency = (efficiency or 85) / 100.0
         mwh = mw * duration
 
-        if monthly.empty:
+        if df.empty:
             empty = _empty_figure("No Data")
             kpis = html.Div(
                 [
                     html.Div(
                         kpi_card(
-                            "Avg Monthly Revenue",
+                            "Daily Spread", "N/A"
+                        ),
+                        style={"flex": "1"},
+                    ),
+                    html.Div(
+                        kpi_card(
+                            "Est. Daily Revenue",
                             "N/A",
                         ),
                         style={"flex": "1"},
                     ),
                     html.Div(
                         kpi_card(
-                            "Revenue Trend",
+                            "Profitable Days",
                             "N/A",
                         ),
                         style={"flex": "1"},
                     ),
                     html.Div(
                         kpi_card(
-                            "BESS Installed",
-                            "N/A",
-                        ),
-                        style={"flex": "1"},
-                    ),
-                    html.Div(
-                        kpi_card(
-                            "Spread per GW BESS",
-                            "N/A",
+                            "Best Spread", "N/A"
                         ),
                         style={"flex": "1"},
                     ),
@@ -311,100 +317,67 @@ def register_callbacks(app):
                 empty,
             )
 
-        # Revenue estimate: spread * MWh * efficiency
-        # per month (approximate: spread * days * cycles)
-        monthly = monthly.copy()
-        monthly["est_revenue"] = (
-            monthly["spread"]
-            * mwh
-            * efficiency
-            * 30
+        # Daily analysis
+        df_daily = df.copy()
+        df_daily["date"] = df_daily[
+            "timestamp"
+        ].dt.date
+        daily = df_daily.groupby("date").agg(
+            price_min=("price_eur_mwh", "min"),
+            price_max=("price_eur_mwh", "max"),
+            price_std=("price_eur_mwh", "std"),
         )
+        daily["spread"] = (
+            daily["price_max"] - daily["price_min"]
+        )
+        daily["revenue_1cycle"] = (
+            daily["spread"] * mwh * efficiency
+        )
+        daily = daily.reset_index()
 
-        # --- KPIs ---
-        trail_12 = monthly.tail(12)
-        avg_monthly_rev = trail_12[
-            "est_revenue"
+        avg_spread = daily["spread"].mean()
+        avg_revenue = daily[
+            "revenue_1cycle"
         ].mean()
-
-        if len(monthly) >= 24:
-            prior_12 = monthly.iloc[-24:-12]
-            prior_avg = prior_12[
-                "est_revenue"
-            ].mean()
-            if prior_avg > 0:
-                rev_trend = (
-                    (avg_monthly_rev - prior_avg)
-                    / prior_avg
-                    * 100
-                )
-                trend_str = f"{rev_trend:+.1f}%"
-            else:
-                trend_str = "N/A"
-        else:
-            trend_str = "N/A"
-
-        # BESS installed capacity
-        current_year = pd.Timestamp.now().year
-        bess_cur = cap_ts[
-            (cap_ts["year"] == current_year)
-            & (
-                cap_ts["source"]
-                == "battery_storage"
-            )
-        ]["capacity_gw"]
-        bess_gw = (
-            bess_cur.iloc[0]
-            if len(bess_cur) > 0
-            else 0
+        profitable = int(
+            (daily["revenue_1cycle"] > 0).sum()
         )
-
-        # Spread per GW BESS
-        avg_spread = trail_12["spread"].mean()
-        spread_per_gw = (
-            avg_spread / bess_gw
-            if bess_gw > 0
-            else 0
-        )
+        best_spread = daily["spread"].max()
 
         kpis = html.Div(
             [
                 html.Div(
                     kpi_card(
-                        "Avg Monthly Revenue (12m)",
-                        f"\u20ac{avg_monthly_rev:,.0f}",
+                        "Avg Daily Spread",
+                        f"{avg_spread:.1f}"
+                        " EUR/MWh",
+                    ),
+                    style={"flex": "1"},
+                ),
+                html.Div(
+                    kpi_card(
+                        "Est. Daily Revenue"
+                        " (1 cycle)",
+                        f"\u20ac{avg_revenue:,.0f}",
                         f"{mw} MW / {mwh} MWh"
-                        f" / {efficiency*100:.0f}%",
+                        f" / {efficiency*100:.0f}%"
+                        " eff",
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Revenue Trend (YoY)",
-                        trend_str,
-                        "12m trailing vs prior 12m",
+                        "Profitable Days",
+                        f"{profitable}"
+                        f" / {len(daily)}",
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "BESS Installed",
-                        f"{bess_gw:.1f} GW",
-                        "Saturation indicator",
-                        color=COLORS[
-                            "accent_cyan"
-                        ],
-                    ),
-                    style={"flex": "1"},
-                ),
-                html.Div(
-                    kpi_card(
-                        "Spread per GW BESS",
-                        (
-                            f"{spread_per_gw:.1f}"
-                            " EUR/MWh/GW"
-                        ),
-                        "Cannibalization metric",
+                        "Best Daily Spread",
+                        f"{best_spread:.1f}"
+                        " EUR/MWh",
                     ),
                     style={"flex": "1"},
                 ),
@@ -416,38 +389,16 @@ def register_callbacks(app):
             },
         )
 
-        # --- Chart 1: Monthly estimated revenue ---
-        rev_fig = monthly_bar_with_rolling_avg(
-            x=monthly["month_str"],
-            y=monthly["est_revenue"],
-            title="Monthly Estimated Revenue",
-            y_title="EUR",
-            bar_color=COLORS["accent_green"],
-            rolling_windows=[
-                (
-                    6,
-                    "6M Rolling",
-                    COLORS["accent_amber"],
-                ),
-            ],
-        )
-
-        # --- Chart 2: Monthly spread with 1st derivative ---
-        spread_series = pd.Series(
-            monthly["spread"].values
-        )
-        spread_diff = spread_series.diff()
-        rolling_spread = spread_series.rolling(
-            6, min_periods=1
-        ).mean()
-
+        # Spread chart
         spread_fig = go.Figure()
         spread_fig.add_trace(
             go.Bar(
-                x=monthly["month_str"].tolist(),
-                y=monthly["spread"].tolist(),
+                x=daily["date"],
+                y=daily["spread"],
                 name="Spread",
-                marker_color=COLORS["accent_amber"],
+                marker_color=COLORS[
+                    "accent_amber"
+                ],
                 marker_line_width=0,
                 hovertemplate=(
                     "%{x}<br>"
@@ -458,220 +409,231 @@ def register_callbacks(app):
         )
         spread_fig.add_trace(
             go.Scatter(
-                x=monthly["month_str"].tolist(),
-                y=rolling_spread.tolist(),
-                name="6M Rolling",
-                mode="lines",
-                line=dict(
-                    color=COLORS["accent_blue"],
-                    width=2.5,
+                x=daily["date"],
+                y=daily["price_min"],
+                name="Min (Buy)",
+                mode="markers",
+                marker=dict(
+                    color=COLORS["accent_green"],
+                    size=6,
                 ),
             )
         )
         spread_fig.add_trace(
             go.Scatter(
-                x=monthly["month_str"].tolist(),
-                y=spread_diff.tolist(),
-                name="MoM Change",
-                mode="lines+markers",
-                line=dict(
+                x=daily["date"],
+                y=daily["price_max"],
+                name="Max (Sell)",
+                mode="markers",
+                marker=dict(
                     color=COLORS["accent_red"],
-                    width=1.5,
-                    dash="dot",
+                    size=6,
                 ),
-                marker=dict(size=3),
-                yaxis="y2",
             )
         )
         apply_theme(spread_fig)
         spread_fig.update_layout(
             title=dict(
-                text=(
-                    "Monthly Spread Trend"
-                    " + 1st Derivative"
-                ),
+                text="Daily Min/Max Price Spread",
                 font=dict(size=15),
             ),
             yaxis=dict(title="EUR/MWh"),
-            yaxis2=dict(
-                title="MoM Change",
-                overlaying="y",
-                side="right",
-                gridcolor="rgba(0,0,0,0)",
+            legend=dict(
+                orientation="h", y=-0.15
             ),
-            legend=dict(orientation="h", y=-0.15),
         )
 
-        # --- Chart 3: BESS capacity vs monthly spread ---
-        # Map monthly spread to corresponding year's BESS capacity
-        monthly_c = monthly.copy()
-        monthly_c["year"] = monthly_c[
-            "month"
-        ].apply(lambda p: p.year)
-
-        bess_by_year = cap_ts[
-            cap_ts["source"] == "battery_storage"
-        ][["year", "capacity_gw"]].copy()
-
-        merged = monthly_c.merge(
-            bess_by_year, on="year", how="left"
-        )
-        merged["capacity_gw"] = merged[
-            "capacity_gw"
-        ].fillna(0)
-
-        cannibal_fig = go.Figure()
-        cannibal_fig.add_trace(
+        # Revenue chart
+        rev_fig = go.Figure()
+        rev_fig.add_trace(
             go.Bar(
-                x=merged["month_str"].tolist(),
-                y=merged["spread"].tolist(),
-                name="Spread",
-                marker_color=COLORS["accent_amber"],
-                marker_line_width=0,
-            )
-        )
-        cannibal_fig.add_trace(
-            go.Scatter(
-                x=merged["month_str"].tolist(),
-                y=merged["capacity_gw"].tolist(),
-                name="BESS Installed (GW)",
-                mode="lines+markers",
-                line=dict(
-                    color=COLORS["accent_cyan"],
-                    width=2.5,
-                ),
-                marker=dict(size=5),
-                yaxis="y2",
-            )
-        )
-        apply_theme(cannibal_fig)
-        cannibal_fig.update_layout(
-            title=dict(
-                text=(
-                    "BESS Capacity vs"
-                    " Monthly Spread"
-                ),
-                font=dict(size=15),
-            ),
-            yaxis=dict(title="EUR/MWh"),
-            yaxis2=dict(
-                title="GW",
-                overlaying="y",
-                side="right",
-                gridcolor="rgba(0,0,0,0)",
-            ),
-            legend=dict(orientation="h", y=-0.15),
-        )
-
-        # --- Chart 4: Revenue per MW annualized ---
-        monthly_c["rev_per_mw_annual"] = (
-            monthly_c["spread"]
-            * duration
-            * efficiency
-            * 30
-            * 12
-        )
-        rev_mw_series = pd.Series(
-            monthly_c["rev_per_mw_annual"].values
-        )
-        rolling_rev = rev_mw_series.rolling(
-            6, min_periods=1
-        ).mean()
-
-        rev_mw_fig = go.Figure()
-        rev_mw_fig.add_trace(
-            go.Scatter(
-                x=monthly_c[
-                    "month_str"
-                ].tolist(),
-                y=monthly_c[
-                    "rev_per_mw_annual"
-                ].tolist(),
-                mode="lines+markers",
-                name="Per-Month Estimate",
-                line=dict(
-                    color=COLORS["accent_blue"],
-                    width=1.5,
-                ),
-                marker=dict(size=3),
-                hovertemplate=(
-                    "%{x}<br>"
-                    "\u20ac%{y:,.0f}/MW/yr"
-                    "<extra></extra>"
-                ),
-            )
-        )
-        rev_mw_fig.add_trace(
-            go.Scatter(
-                x=monthly_c[
-                    "month_str"
-                ].tolist(),
-                y=rolling_rev.tolist(),
-                mode="lines",
-                name="6M Rolling",
-                line=dict(
-                    color=COLORS["accent_green"],
-                    width=2.5,
-                ),
-            )
-        )
-        apply_theme(rev_mw_fig)
-        rev_mw_fig.update_layout(
-            title=dict(
-                text=(
-                    "Revenue per MW"
-                    " (Annualized Estimate)"
-                ),
-                font=dict(size=15),
-            ),
-            yaxis=dict(title="EUR/MW/year"),
-            legend=dict(orientation="h", y=-0.15),
-        )
-
-        # --- Chart 5: Spread 2nd derivative ---
-        spread_2nd = spread_diff.diff()
-
-        second_fig = go.Figure(
-            go.Bar(
-                x=monthly["month_str"].tolist(),
-                y=spread_2nd.tolist(),
-                marker_color=[
-                    COLORS["accent_green"]
-                    if v >= 0
-                    else COLORS["accent_red"]
-                    for v in spread_2nd.fillna(0)
+                x=daily["date"],
+                y=daily["revenue_1cycle"],
+                name="1 Cycle/Day",
+                marker_color=COLORS[
+                    "accent_blue"
                 ],
                 marker_line_width=0,
                 hovertemplate=(
                     "%{x}<br>"
-                    "Acceleration: %{y:.2f}"
+                    "Revenue: \u20ac%{y:,.0f}"
                     "<extra></extra>"
                 ),
             )
         )
-        second_fig.add_hline(
-            y=0,
-            line_dash="dash",
-            line_color=COLORS["text_muted"],
-            line_width=1,
+        rev_fig.add_trace(
+            go.Bar(
+                x=daily["date"],
+                y=daily["revenue_1cycle"] * 1.7,
+                name="2 Cycles/Day (est.)",
+                marker_color=COLORS[
+                    "accent_cyan"
+                ],
+                marker_line_width=0,
+                opacity=0.6,
+                hovertemplate=(
+                    "%{x}<br>"
+                    "Revenue: \u20ac%{y:,.0f}"
+                    "<extra></extra>"
+                ),
+            )
         )
-        apply_theme(second_fig)
-        second_fig.update_layout(
+        apply_theme(rev_fig)
+        rev_fig.update_layout(
             title=dict(
                 text=(
-                    "Spread 2nd Derivative"
-                    " (Acceleration)"
+                    "Estimated Arbitrage Revenue"
+                ),
+                font=dict(size=15),
+            ),
+            yaxis=dict(title="EUR"),
+            barmode="group",
+            legend=dict(
+                orientation="h", y=-0.15
+            ),
+        )
+
+        # Volatility
+        vol_fig = go.Figure(
+            go.Scatter(
+                x=daily["date"],
+                y=daily["price_std"],
+                mode="lines+markers",
+                line=dict(
+                    color=COLORS["accent_purple"],
+                    width=2,
+                ),
+                marker=dict(size=5),
+                fill="tozeroy",
+                fillcolor=(
+                    "rgba(139,92,246,0.1)"
+                ),
+                hovertemplate=(
+                    "%{x}<br>"
+                    "Std Dev: %{y:.1f} EUR/MWh"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        apply_theme(vol_fig)
+        vol_fig.update_layout(
+            title=dict(
+                text=(
+                    "Intraday Price Volatility"
+                    " (Std Dev)"
                 ),
                 font=dict(size=15),
             ),
             yaxis=dict(title="EUR/MWh"),
+        )
+
+        # Optimal charge/discharge heatmap
+        df_tmp = df.copy()
+        df_tmp["hour"] = df_tmp[
+            "timestamp"
+        ].dt.hour
+        df_tmp["date"] = df_tmp[
+            "timestamp"
+        ].dt.date.astype(str)
+        pivot = df_tmp.pivot_table(
+            values="price_eur_mwh",
+            index="date",
+            columns="hour",
+            aggfunc="mean",
+        )
+        pivot = pivot.sort_index(ascending=True)
+        hours = list(range(24))
+        existing = [
+            h for h in hours if h in pivot.columns
+        ]
+
+        opt_fig = heatmap_chart(
+            z_data=pivot[existing].values,
+            x_labels=[
+                f"{h:02d}:00" for h in existing
+            ],
+            y_labels=list(pivot.index),
+            title=(
+                "Optimal Charge/Discharge Hours"
+            ),
+            colorscale="RdYlGn_r",
+            z_label="EUR/MWh",
+        )
+
+        # Monthly revenue potential
+        daily["month"] = pd.to_datetime(
+            daily["date"]
+        ).dt.to_period("M")
+        monthly = (
+            daily.groupby("month")
+            .agg(
+                total_revenue=(
+                    "revenue_1cycle",
+                    "sum",
+                ),
+                avg_spread=("spread", "mean"),
+                days=("date", "count"),
+            )
+            .reset_index()
+        )
+        monthly["month"] = monthly[
+            "month"
+        ].astype(str)
+
+        monthly_fig = go.Figure()
+        monthly_fig.add_trace(
+            go.Bar(
+                x=monthly["month"],
+                y=monthly["total_revenue"],
+                name="Monthly Revenue",
+                marker_color=COLORS[
+                    "accent_green"
+                ],
+                marker_line_width=0,
+                hovertemplate=(
+                    "%{x}<br>"
+                    "Revenue: \u20ac%{y:,.0f}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        monthly_fig.add_trace(
+            go.Scatter(
+                x=monthly["month"],
+                y=monthly["avg_spread"],
+                name="Avg Spread",
+                mode="lines+markers",
+                line=dict(
+                    color=COLORS["accent_amber"],
+                    width=2.5,
+                ),
+                marker=dict(size=7),
+                yaxis="y2",
+            )
+        )
+        apply_theme(monthly_fig)
+        monthly_fig.update_layout(
+            title=dict(
+                text="Monthly Revenue Potential",
+                font=dict(size=15),
+            ),
+            yaxis=dict(title="EUR"),
+            yaxis2=dict(
+                title="Avg Spread (EUR/MWh)",
+                overlaying="y",
+                side="right",
+                gridcolor="rgba(0,0,0,0)",
+            ),
+            legend=dict(
+                orientation="h", y=-0.15
+            ),
         )
 
         return (
             kpis,
             spread_fig,
             rev_fig,
-            cannibal_fig,
-            rev_mw_fig,
-            second_fig,
+            vol_fig,
+            opt_fig,
+            monthly_fig,
         )

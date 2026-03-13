@@ -1,12 +1,21 @@
-"""Tab 3: Generation Mix — solar, wind, gas, nuclear breakdown for Spain."""
+"""Tab 2: Generation Trends & Derivatives — how fast is the mix shifting?"""
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, dcc, html
 
+from components.analytics import (
+    add_trendline_trace,
+    compute_acceleration,
+    compute_linear_trend,
+    compute_monthly_derivative,
+    compute_yoy_comparison,
+    trend_arrow,
+)
 from components.charts import (
-    generation_stacked_area,
     _empty_figure,
+    generation_stacked_area,
 )
 from components.kpi_cards import kpi_card
 from components.theme import (
@@ -51,7 +60,7 @@ def layout():
                 [
                     html.Div(
                         dcc.Graph(
-                            id="es-gen-solar-profile",
+                            id="es-gen-1st-deriv",
                             config={
                                 "displayModeBar": False
                             },
@@ -63,7 +72,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="es-gen-wind-profile",
+                            id="es-gen-2nd-deriv",
                             config={
                                 "displayModeBar": False
                             },
@@ -81,7 +90,14 @@ def layout():
             ),
             html.Div(
                 dcc.Graph(
-                    id="es-gen-pie",
+                    id="es-gen-displacement",
+                    config={"displayModeBar": False},
+                ),
+                style=card_style(),
+            ),
+            html.Div(
+                dcc.Graph(
+                    id="es-gen-yoy",
                     config={"displayModeBar": False},
                 ),
                 style=card_style(),
@@ -95,11 +111,12 @@ def register_callbacks(app):
         [
             Output("es-gen-kpis", "children"),
             Output("es-gen-stacked", "figure"),
+            Output("es-gen-1st-deriv", "figure"),
+            Output("es-gen-2nd-deriv", "figure"),
             Output(
-                "es-gen-solar-profile", "figure"
+                "es-gen-displacement", "figure"
             ),
-            Output("es-gen-wind-profile", "figure"),
-            Output("es-gen-pie", "figure"),
+            Output("es-gen-yoy", "figure"),
         ],
         [
             Input("date-start", "date"),
@@ -111,109 +128,147 @@ def register_callbacks(app):
             start_date
         ).to_pydatetime()
         end = pd.Timestamp(end_date).to_pydatetime()
-        gen = fetch_generation_by_source(start, end)
+        gen = fetch_generation_by_source(
+            start, end, time_trunc="month"
+        )
 
         source_cols = [
             c
             for c in gen.columns
             if c != "timestamp"
         ]
-        if not gen.empty and source_cols:
-            total = gen[source_cols].sum(axis=1)
-            total_sum = total.sum()
 
+        # Compute monthly RE %
+        if not gen.empty and source_cols:
+            gen_m = gen.copy()
+            gen_m["total"] = gen_m[
+                source_cols
+            ].sum(axis=1)
             solar_cols = [
                 c
-                for c in ["solar_pv", "solar_thermal"]
-                if c in gen.columns
-            ]
-            solar_sum = (
-                gen[solar_cols].sum().sum()
-                if solar_cols
-                else 0
-            )
-            wind_sum = (
-                gen["wind"].sum()
-                if "wind" in gen.columns
-                else 0
-            )
-            fossil_cols = [
-                c
                 for c in [
-                    "combined_cycle",
-                    "coal",
-                    "gas",
-                    "oil",
-                    "cogeneration",
+                    "solar_pv",
+                    "solar_thermal",
                 ]
                 if c in gen.columns
             ]
-            fossil_sum = (
-                gen[fossil_cols].sum().sum()
-                if fossil_cols
-                else 0
+            wind_cols = [
+                c
+                for c in ["wind"]
+                if c in gen.columns
+            ]
+            re_cols = solar_cols + wind_cols
+            gen_m["re_total"] = gen_m[
+                re_cols
+            ].sum(axis=1)
+            gen_m["re_pct"] = (
+                gen_m["re_total"]
+                / gen_m["total"].replace(
+                    0, float("nan")
+                )
+                * 100
             )
 
-            solar_pct = (
-                f"{solar_sum / total_sum * 100:.1f}%"
-                if total_sum > 0
-                else "N/A"
-            )
-            wind_pct = (
-                f"{wind_sum / total_sum * 100:.1f}%"
-                if total_sum > 0
-                else "N/A"
-            )
-            fossil_pct = (
-                f"{fossil_sum / total_sum * 100:.1f}%"
-                if total_sum > 0
-                else "N/A"
-            )
-            renewable_sum = solar_sum + wind_sum
-            re_pct = (
-                f"{renewable_sum / total_sum * 100:.1f}%"
-                if total_sum > 0
-                else "N/A"
-            )
+            # Source shares
+            for col in source_cols:
+                gen_m[f"{col}_pct"] = (
+                    gen_m[col]
+                    / gen_m["total"].replace(
+                        0, float("nan")
+                    )
+                    * 100
+                )
         else:
-            solar_pct = "N/A"
-            wind_pct = "N/A"
-            fossil_pct = "N/A"
-            re_pct = "N/A"
+            gen_m = pd.DataFrame()
+
+        # --- KPIs ---
+        solar_rate = "N/A"
+        wind_rate = "N/A"
+        ccgt_rate = "N/A"
+        accel_str = "N/A"
+
+        if not gen_m.empty:
+            if "solar_pv_pct" in gen_m.columns:
+                slope, _, _ = compute_linear_trend(
+                    gen_m["solar_pv_pct"]
+                )
+                solar_rate = (
+                    f"{slope * 12:.1f} pp/year"
+                )
+            if "wind_pct" in gen_m.columns:
+                slope, _, _ = compute_linear_trend(
+                    gen_m["wind_pct"]
+                )
+                wind_rate = (
+                    f"{slope * 12:.1f} pp/year"
+                )
+            if (
+                "combined_cycle_pct"
+                in gen_m.columns
+            ):
+                slope, _, _ = compute_linear_trend(
+                    gen_m["combined_cycle_pct"]
+                )
+                ccgt_rate = (
+                    f"{slope * 12:.1f} pp/year"
+                )
+
+            if "re_pct" in gen_m.columns:
+                accel = compute_acceleration(
+                    gen_m["re_pct"]
+                )
+                recent = accel.dropna().tail(3)
+                if not recent.empty:
+                    avg_accel = recent.mean()
+                    if avg_accel > 0.1:
+                        accel_str = "Accelerating"
+                    elif avg_accel < -0.1:
+                        accel_str = "Decelerating"
+                    else:
+                        accel_str = "Steady"
 
         kpis = html.Div(
             [
                 html.Div(
                     kpi_card(
-                        "Solar Share",
-                        solar_pct,
-                        color=SOURCE_COLORS[
-                            "solar_pv"
+                        "Solar Growth",
+                        solar_rate,
+                        "Linear fit pp/year",
+                        color=SOURCE_COLORS.get(
+                            "solar_pv",
+                            COLORS["accent_amber"],
+                        ),
+                    ),
+                    style={"flex": "1"},
+                ),
+                html.Div(
+                    kpi_card(
+                        "Wind Growth",
+                        wind_rate,
+                        "Linear fit pp/year",
+                        color=SOURCE_COLORS.get(
+                            "wind",
+                            COLORS["accent_blue"],
+                        ),
+                    ),
+                    style={"flex": "1"},
+                ),
+                html.Div(
+                    kpi_card(
+                        "CCGT Decline",
+                        ccgt_rate,
+                        "Linear fit pp/year",
+                        color=COLORS[
+                            "accent_red"
                         ],
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Wind Share",
-                        wind_pct,
-                        color=SOURCE_COLORS["wind"],
-                    ),
-                    style={"flex": "1"},
-                ),
-                html.Div(
-                    kpi_card(
-                        "Fossil Share",
-                        fossil_pct,
-                        color=COLORS["accent_red"],
-                    ),
-                    style={"flex": "1"},
-                ),
-                html.Div(
-                    kpi_card(
-                        "Renewable (Solar+Wind)",
-                        re_pct,
-                        color=COLORS["accent_green"],
+                        "RE Acceleration",
+                        accel_str,
+                        "2nd derivative",
                     ),
                     style={"flex": "1"},
                 ),
@@ -225,204 +280,288 @@ def register_callbacks(app):
             },
         )
 
-        # Stacked area
+        # --- Chart 1: Monthly Stacked Area ---
         stacked_fig = generation_stacked_area(
             gen,
-            "Generation by Source",
+            "Monthly Generation Share",
             source_order=SPAIN_SOURCE_ORDER,
         )
 
-        # Solar daily profile
-        solar_cols = [
-            c
-            for c in ["solar_pv", "solar_thermal"]
-            if c in gen.columns
-        ]
-        if not gen.empty and solar_cols:
-            gen_tmp = gen.copy()
-            gen_tmp["solar_total"] = gen_tmp[
-                solar_cols
-            ].sum(axis=1)
-            gen_tmp["hour"] = gen_tmp[
-                "timestamp"
-            ].dt.hour
-            solar_profile = (
-                gen_tmp.groupby("hour")[
-                    "solar_total"
-                ]
-                .mean()
-                .reset_index()
-            )
-            solar_fig = go.Figure(
-                go.Scatter(
-                    x=solar_profile["hour"],
-                    y=solar_profile["solar_total"],
-                    mode="lines+markers",
-                    fill="tozeroy",
-                    line=dict(
-                        color=SOURCE_COLORS[
-                            "solar_pv"
-                        ],
-                        width=2.5,
-                    ),
-                    fillcolor=(
-                        "rgba(245,158,11,0.15)"
-                    ),
-                    marker=dict(size=5),
-                    hovertemplate=(
-                        "Hour %{x}:00<br>"
-                        "%{y:,.0f} MW avg"
-                        "<extra></extra>"
-                    ),
-                )
-            )
-            apply_theme(solar_fig)
-            solar_fig.update_layout(
-                title=dict(
-                    text=(
-                        "Avg Solar Generation by Hour"
-                    ),
-                    font=dict(size=15),
-                ),
-                xaxis=dict(
-                    title="Hour of Day",
-                    dtick=2,
-                ),
-                yaxis=dict(title="MW"),
-            )
-        else:
-            solar_fig = _empty_figure(
-                "Solar Profile"
-            )
-
-        # Wind profile
+        # --- Chart 2: RE Penetration 1st Derivative ---
         if (
-            not gen.empty
-            and "wind" in gen.columns
+            not gen_m.empty
+            and "re_pct" in gen_m.columns
         ):
-            gen_tmp = gen.copy()
-            gen_tmp["hour"] = gen_tmp[
-                "timestamp"
-            ].dt.hour
-            wind_profile = (
-                gen_tmp.groupby("hour")["wind"]
-                .agg(["mean", "min", "max"])
-                .reset_index()
+            deriv1 = compute_monthly_derivative(
+                gen_m["re_pct"]
             )
-            wind_fig = go.Figure()
-            wind_fig.add_trace(
-                go.Scatter(
-                    x=wind_profile["hour"],
-                    y=wind_profile["max"],
-                    mode="lines",
-                    line=dict(width=0),
-                    showlegend=False,
-                )
-            )
-            wind_fig.add_trace(
-                go.Scatter(
-                    x=wind_profile["hour"],
-                    y=wind_profile["min"],
-                    mode="lines",
-                    line=dict(width=0),
-                    fill="tonexty",
-                    fillcolor=(
-                        "rgba(59,130,246,0.15)"
-                    ),
-                    showlegend=False,
-                )
-            )
-            wind_fig.add_trace(
-                go.Scatter(
-                    x=wind_profile["hour"],
-                    y=wind_profile["mean"],
-                    mode="lines+markers",
-                    line=dict(
-                        color=SOURCE_COLORS["wind"],
-                        width=2.5,
-                    ),
-                    marker=dict(size=5),
-                    name="Avg",
+            colors = [
+                COLORS["accent_green"]
+                if v >= 0
+                else COLORS["accent_red"]
+                for v in deriv1.fillna(0)
+            ]
+            d1_fig = go.Figure(
+                go.Bar(
+                    x=gen_m["timestamp"],
+                    y=deriv1,
+                    marker_color=colors,
+                    marker_line_width=0,
                     hovertemplate=(
-                        "Hour %{x}:00<br>"
-                        "%{y:,.0f} MW avg"
+                        "%{x|%Y-%m}<br>"
+                        "MoM Change: %{y:+.2f} pp"
                         "<extra></extra>"
                     ),
                 )
             )
-            apply_theme(wind_fig)
-            wind_fig.update_layout(
+            apply_theme(d1_fig)
+            d1_fig.update_layout(
                 title=dict(
                     text=(
-                        "Wind Generation by Hour"
-                        " (Avg / Min / Max)"
+                        "RE Penetration"
+                        " \u2014 1st Derivative"
+                        " (MoM Change)"
                     ),
                     font=dict(size=15),
                 ),
-                xaxis=dict(
-                    title="Hour of Day",
-                    dtick=2,
+                yaxis=dict(
+                    title="Change (pp)"
                 ),
-                yaxis=dict(title="MW"),
-                showlegend=False,
+            )
+            d1_fig.add_hline(
+                y=0,
+                line_color=COLORS["text_muted"],
+                line_width=1,
             )
         else:
-            wind_fig = _empty_figure("Wind Profile")
+            d1_fig = _empty_figure(
+                "1st Derivative"
+            )
 
-        # Generation mix pie chart
-        if not gen.empty and source_cols:
-            totals = {}
-            for col in source_cols:
-                s = gen[col].sum()
-                if s > 0:
-                    totals[col] = s
-            if totals:
-                labels = [
-                    SOURCE_LABELS.get(k, k)
-                    for k in totals
-                ]
-                values = list(totals.values())
-                colors = [
-                    SOURCE_COLORS.get(
-                        k, COLORS["accent_blue"]
-                    )
-                    for k in totals
-                ]
-                pie_fig = go.Figure(
-                    go.Pie(
-                        labels=labels,
-                        values=values,
-                        marker=dict(colors=colors),
-                        hole=0.55,
-                        textinfo="label+percent",
-                        textfont=dict(
-                            size=11,
-                            color=COLORS["text"],
+        # --- Chart 3: RE Penetration 2nd Derivative ---
+        if (
+            not gen_m.empty
+            and "re_pct" in gen_m.columns
+        ):
+            accel_series = compute_acceleration(
+                gen_m["re_pct"]
+            )
+            d2_fig = go.Figure(
+                go.Scatter(
+                    x=gen_m["timestamp"],
+                    y=accel_series,
+                    mode="lines+markers",
+                    line=dict(
+                        color=COLORS[
+                            "accent_purple"
+                        ],
+                        width=2,
+                    ),
+                    marker=dict(size=5),
+                    fill="tozeroy",
+                    fillcolor=(
+                        "rgba(139,92,246,0.1)"
+                    ),
+                    hovertemplate=(
+                        "%{x|%Y-%m}<br>"
+                        "Acceleration: %{y:+.3f}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+            d2_fig.add_hline(
+                y=0,
+                line_dash="dash",
+                line_color=COLORS["text_muted"],
+                line_width=1,
+                annotation_text=(
+                    "Above = accelerating"
+                ),
+                annotation_font_color=COLORS[
+                    "text_muted"
+                ],
+            )
+            apply_theme(d2_fig)
+            d2_fig.update_layout(
+                title=dict(
+                    text=(
+                        "RE Penetration"
+                        " \u2014 2nd Derivative"
+                        " (Acceleration)"
+                    ),
+                    font=dict(size=15),
+                ),
+                yaxis=dict(
+                    title="Acceleration (pp)"
+                ),
+            )
+        else:
+            d2_fig = _empty_figure(
+                "2nd Derivative"
+            )
+
+        # --- Chart 4: Source Displacement Curves ---
+        displacement_sources = [
+            "solar_pv",
+            "wind",
+            "combined_cycle",
+            "coal",
+        ]
+        disp_fig = go.Figure()
+        has_disp = False
+
+        if not gen.empty:
+            for src in displacement_sources:
+                if src not in gen.columns:
+                    continue
+                has_disp = True
+                disp_fig.add_trace(
+                    go.Scatter(
+                        x=gen["timestamp"],
+                        y=gen[src],
+                        name=SOURCE_LABELS.get(
+                            src, src
+                        ),
+                        mode="lines",
+                        line=dict(
+                            color=SOURCE_COLORS.get(
+                                src,
+                                COLORS[
+                                    "accent_blue"
+                                ],
+                            ),
+                            width=2,
+                        ),
+                        hovertemplate=(
+                            f"{SOURCE_LABELS.get(src, src)}"
+                            ": %{y:,.0f} MWh"
+                            "<extra></extra>"
                         ),
                     )
                 )
-                apply_theme(pie_fig)
-                pie_fig.update_layout(
+                # Add trendline for each
+                add_trendline_trace(
+                    disp_fig,
+                    gen["timestamp"],
+                    gen[src],
+                    color=SOURCE_COLORS.get(
+                        src,
+                        COLORS["accent_blue"],
+                    ),
+                    name=f"{SOURCE_LABELS.get(src, src)} Trend",
+                    dash="dot",
+                )
+
+        if has_disp:
+            apply_theme(disp_fig)
+            disp_fig.update_layout(
+                title=dict(
+                    text=(
+                        "Source Displacement Curves"
+                        " + Trendlines"
+                    ),
+                    font=dict(size=15),
+                ),
+                yaxis=dict(title="MWh"),
+                legend=dict(
+                    orientation="h", y=-0.15
+                ),
+                hovermode="x unified",
+            )
+        else:
+            disp_fig = _empty_figure(
+                "Source Displacement"
+            )
+
+        # --- Chart 5: YoY Comparison ---
+        if (
+            not gen_m.empty
+            and "re_pct" in gen_m.columns
+        ):
+            yoy = compute_yoy_comparison(
+                gen_m, "timestamp", "re_pct"
+            )
+            if not yoy.empty:
+                month_names = [
+                    "Jan",
+                    "Feb",
+                    "Mar",
+                    "Apr",
+                    "May",
+                    "Jun",
+                    "Jul",
+                    "Aug",
+                    "Sep",
+                    "Oct",
+                    "Nov",
+                    "Dec",
+                ]
+                yoy["month_name"] = yoy[
+                    "month"
+                ].apply(
+                    lambda m: month_names[m - 1]
+                    if 1 <= m <= 12
+                    else str(m)
+                )
+                yoy_fig = go.Figure()
+                yoy_fig.add_trace(
+                    go.Bar(
+                        x=yoy["month_name"],
+                        y=yoy["prior_year"],
+                        name=yoy[
+                            "prior_label"
+                        ].iloc[0],
+                        marker_color=COLORS[
+                            "text_muted"
+                        ],
+                        marker_line_width=0,
+                        opacity=0.5,
+                    )
+                )
+                yoy_fig.add_trace(
+                    go.Bar(
+                        x=yoy["month_name"],
+                        y=yoy["current_year"],
+                        name=yoy[
+                            "current_label"
+                        ].iloc[0],
+                        marker_color=COLORS[
+                            "accent_green"
+                        ],
+                        marker_line_width=0,
+                    )
+                )
+                apply_theme(yoy_fig)
+                yoy_fig.update_layout(
                     title=dict(
-                        text="Generation Mix Share",
+                        text=(
+                            "RE Share"
+                            " \u2014 Year-over-Year"
+                        ),
                         font=dict(size=15),
                     ),
-                    showlegend=False,
-                    height=400,
+                    yaxis=dict(
+                        title="Renewable %"
+                    ),
+                    barmode="group",
+                    legend=dict(
+                        orientation="h", y=-0.15
+                    ),
                 )
             else:
-                pie_fig = _empty_figure(
-                    "Generation Mix"
+                yoy_fig = _empty_figure(
+                    "YoY Comparison"
                 )
         else:
-            pie_fig = _empty_figure(
-                "Generation Mix"
+            yoy_fig = _empty_figure(
+                "YoY Comparison"
             )
 
         return (
             kpis,
             stacked_fig,
-            solar_fig,
-            wind_fig,
-            pie_fig,
+            d1_fig,
+            d2_fig,
+            disp_fig,
+            yoy_fig,
         )

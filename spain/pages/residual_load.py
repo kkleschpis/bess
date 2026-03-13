@@ -1,26 +1,25 @@
-"""Tab 6: Residual Load & System — fundamental metric for BESS in Spain."""
+"""Tab 4: Duck Curve Evolution — residual load changes driving BESS value."""
 
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, dcc, html
 
-from components.charts import (
-    _empty_figure,
-    heatmap_chart,
-    scatter_chart,
+from components.analytics import (
+    add_trendline_trace,
+    compute_linear_trend,
+    compute_monthly_derivative,
 )
+from components.charts import _empty_figure
 from components.kpi_cards import kpi_card
 from components.theme import COLORS, apply_theme, card_style
 from data.api_client import (
-    fetch_cross_border_flows,
-    fetch_day_ahead_prices,
     fetch_generation_by_source,
     fetch_total_load,
 )
 
 
-def _compute_residual(load_df, gen_df):
-    """Compute residual load = Total Load - Solar - Wind."""
+def _compute_residual_monthly(load_df, gen_df):
+    """Compute monthly residual load stats."""
     if load_df.empty or gen_df.empty:
         return pd.DataFrame()
 
@@ -36,10 +35,12 @@ def _compute_residual(load_df, gen_df):
     if not ws_cols:
         return pd.DataFrame()
 
-    gen_sub = gen_df[["timestamp"] + ws_cols].copy()
-    gen_sub["renewable_mw"] = gen_sub[ws_cols].sum(
-        axis=1
-    )
+    gen_sub = gen_df[
+        ["timestamp"] + ws_cols
+    ].copy()
+    gen_sub["renewable_mw"] = gen_sub[
+        ws_cols
+    ].sum(axis=1)
 
     merged = pd.merge_asof(
         load_df.sort_values("timestamp"),
@@ -50,7 +51,8 @@ def _compute_residual(load_df, gen_df):
         direction="nearest",
     )
     merged["residual_load"] = (
-        merged["load_mw"] - merged["renewable_mw"]
+        merged["load_mw"]
+        - merged["renewable_mw"]
     )
     return merged
 
@@ -61,7 +63,7 @@ def layout():
             html.Div(id="es-residual-kpis"),
             html.Div(
                 dcc.Graph(
-                    id="es-residual-curve",
+                    id="es-residual-monthly",
                     config={"displayModeBar": False},
                 ),
                 style=card_style(),
@@ -70,7 +72,7 @@ def layout():
                 [
                     html.Div(
                         dcc.Graph(
-                            id="es-residual-scatter",
+                            id="es-residual-duck",
                             config={
                                 "displayModeBar": False
                             },
@@ -82,7 +84,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="es-residual-flows",
+                            id="es-residual-neg-trend",
                             config={
                                 "displayModeBar": False
                             },
@@ -100,7 +102,7 @@ def layout():
             ),
             html.Div(
                 dcc.Graph(
-                    id="es-residual-heatmap",
+                    id="es-residual-min-deriv",
                     config={"displayModeBar": False},
                 ),
                 style=card_style(),
@@ -113,13 +115,15 @@ def register_callbacks(app):
     @app.callback(
         [
             Output("es-residual-kpis", "children"),
-            Output("es-residual-curve", "figure"),
             Output(
-                "es-residual-scatter", "figure"
+                "es-residual-monthly", "figure"
             ),
-            Output("es-residual-flows", "figure"),
+            Output("es-residual-duck", "figure"),
             Output(
-                "es-residual-heatmap", "figure"
+                "es-residual-neg-trend", "figure"
+            ),
+            Output(
+                "es-residual-min-deriv", "figure"
             ),
         ],
         [
@@ -133,79 +137,133 @@ def register_callbacks(app):
         ).to_pydatetime()
         end = pd.Timestamp(end_date).to_pydatetime()
 
-        load_df = fetch_total_load(start, end)
+        load_df = fetch_total_load(
+            start, end, time_trunc="month"
+        )
         gen_df = fetch_generation_by_source(
-            start, end
+            start, end, time_trunc="month"
         )
-        prices_df = fetch_day_ahead_prices(
-            start, end
-        )
-        flows_df = fetch_cross_border_flows(
+
+        # Also fetch daily for duck curve overlay
+        load_daily = fetch_total_load(start, end)
+        gen_daily = fetch_generation_by_source(
             start, end
         )
 
-        merged = _compute_residual(load_df, gen_df)
+        merged_m = _compute_residual_monthly(
+            load_df, gen_df
+        )
+        merged_d = _compute_residual_monthly(
+            load_daily, gen_daily
+        )
 
-        # KPIs
-        if not merged.empty:
-            current_res = (
-                f"{merged['residual_load'].iloc[-1]:,.0f}"
+        # Monthly stats from daily data
+        if not merged_d.empty:
+            md = merged_d.copy()
+            md["month"] = md[
+                "timestamp"
+            ].dt.to_period("M")
+            monthly_stats = (
+                md.groupby("month")
+                .agg(
+                    avg_residual=(
+                        "residual_load",
+                        "mean",
+                    ),
+                    min_residual=(
+                        "residual_load",
+                        "min",
+                    ),
+                    max_residual=(
+                        "residual_load",
+                        "max",
+                    ),
+                )
+                .reset_index()
+            )
+            monthly_stats["month_dt"] = (
+                monthly_stats["month"].apply(
+                    lambda x: x.to_timestamp()
+                )
+            )
+            neg_res = (
+                md[md["residual_load"] < 0]
+                .groupby("month")
+                .size()
+                .reset_index(name="neg_count")
+            )
+            neg_res["month_dt"] = neg_res[
+                "month"
+            ].apply(lambda x: x.to_timestamp())
+        else:
+            monthly_stats = pd.DataFrame()
+            neg_res = pd.DataFrame()
+
+        # --- KPIs ---
+        avg_trend = "N/A"
+        min_res = "N/A"
+        neg_trend = "N/A"
+        duck_depth = "N/A"
+
+        if not monthly_stats.empty:
+            slope, _, _ = compute_linear_trend(
+                monthly_stats["avg_residual"]
+            )
+            avg_trend = (
+                f"{slope * 12:,.0f} MW/year"
+            )
+            min_res = (
+                f"{monthly_stats['min_residual'].iloc[-1]:,.0f}"
                 " MW"
             )
-            avg_res = (
-                f"{merged['residual_load'].mean():,.0f}"
-                " MW"
+            if not neg_res.empty:
+                neg_slope, _, _ = (
+                    compute_linear_trend(
+                        neg_res["neg_count"].astype(
+                            float
+                        )
+                    )
+                )
+                neg_trend = (
+                    f"{neg_slope:+.1f}/mo"
+                )
+            # Duck depth rate
+            min_slope, _, _ = (
+                compute_linear_trend(
+                    monthly_stats["min_residual"]
+                )
             )
-            neg_hours = int(
-                (merged["residual_load"] < 0).sum()
+            duck_depth = (
+                f"{min_slope * 12:,.0f} MW/year"
             )
-            neg_hours_str = str(neg_hours)
-        else:
-            current_res = "N/A"
-            avg_res = "N/A"
-            neg_hours_str = "N/A"
-
-        if not flows_df.empty:
-            net_flow = flows_df["flow_mw"].sum()
-            flow_str = f"{net_flow:,.0f} MW"
-            flow_dir = (
-                "(Net Export)"
-                if net_flow > 0
-                else "(Net Import)"
-            )
-        else:
-            flow_str = "N/A"
-            flow_dir = ""
 
         kpis = html.Div(
             [
                 html.Div(
                     kpi_card(
-                        "Current Residual Load",
-                        current_res,
+                        "Avg Residual Trend",
+                        avg_trend,
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Avg Residual Load",
-                        avg_res,
+                        "Latest Min Residual",
+                        min_res,
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Negative Residual Intervals",
-                        neg_hours_str,
-                        "Excess RE generation",
+                        "Neg Residual Hrs/Mo",
+                        neg_trend,
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Cross-Border Net Flow",
-                        flow_str,
-                        flow_dir,
+                        "Duck Depth Rate",
+                        duck_depth,
                     ),
                     style={"flex": "1"},
                 ),
@@ -217,210 +275,276 @@ def register_callbacks(app):
             },
         )
 
-        # Residual load curve
-        if not merged.empty:
-            curve_fig = go.Figure()
-            curve_fig.add_trace(
+        # --- Chart 1: Monthly Residual Envelope ---
+        if not monthly_stats.empty:
+            m_fig = go.Figure()
+            m_fig.add_trace(
                 go.Scatter(
-                    x=merged["timestamp"],
-                    y=merged["load_mw"],
-                    name="Total Load",
+                    x=monthly_stats["month_dt"],
+                    y=monthly_stats[
+                        "max_residual"
+                    ],
                     mode="lines",
-                    line=dict(
-                        color=COLORS["text_muted"],
-                        width=1,
-                        dash="dot",
-                    ),
-                    hovertemplate=(
-                        "Load: %{y:,.0f} MW"
-                        "<extra></extra>"
-                    ),
+                    line=dict(width=0),
+                    showlegend=False,
+                    hoverinfo="skip",
                 )
             )
-            curve_fig.add_trace(
+            m_fig.add_trace(
                 go.Scatter(
-                    x=merged["timestamp"],
-                    y=merged["renewable_mw"],
-                    name="Solar + Wind",
+                    x=monthly_stats["month_dt"],
+                    y=monthly_stats[
+                        "min_residual"
+                    ],
                     mode="lines",
+                    line=dict(width=0),
+                    fill="tonexty",
+                    fillcolor=(
+                        "rgba(6,182,212,0.15)"
+                    ),
+                    name="Min-Max Band",
+                    hoverinfo="skip",
+                )
+            )
+            m_fig.add_trace(
+                go.Scatter(
+                    x=monthly_stats["month_dt"],
+                    y=monthly_stats[
+                        "avg_residual"
+                    ],
+                    mode="lines+markers",
+                    name="Avg Residual",
                     line=dict(
                         color=COLORS[
-                            "accent_green"
+                            "accent_cyan"
                         ],
-                        width=1.5,
-                    ),
-                    fill="tozeroy",
-                    fillcolor=(
-                        "rgba(16,185,129,0.1)"
-                    ),
-                    hovertemplate=(
-                        "RE: %{y:,.0f} MW"
-                        "<extra></extra>"
-                    ),
-                )
-            )
-            curve_fig.add_trace(
-                go.Scatter(
-                    x=merged["timestamp"],
-                    y=merged["residual_load"],
-                    name="Residual Load",
-                    mode="lines",
-                    line=dict(
-                        color=COLORS["accent_cyan"],
                         width=2.5,
                     ),
+                    marker=dict(size=5),
                     hovertemplate=(
-                        "Residual: %{y:,.0f} MW"
+                        "%{x|%Y-%m}<br>"
+                        "Avg: %{y:,.0f} MW"
                         "<extra></extra>"
                     ),
                 )
             )
-            curve_fig.add_hline(
+            add_trendline_trace(
+                m_fig,
+                monthly_stats["month_dt"],
+                monthly_stats["avg_residual"],
+                color=COLORS["accent_red"],
+                name="Trend",
+            )
+            m_fig.add_hline(
                 y=0,
                 line_dash="dash",
                 line_color=COLORS["accent_red"],
                 line_width=1,
             )
-            apply_theme(curve_fig)
-            curve_fig.update_layout(
+            apply_theme(m_fig)
+            m_fig.update_layout(
                 title=dict(
                     text=(
-                        "Residual Load"
-                        " (Total Load"
-                        " - Solar - Wind)"
+                        "Monthly Residual Load"
+                        " (Avg + Min/Max Band)"
                     ),
                     font=dict(size=15),
                 ),
                 yaxis=dict(title="MW"),
-                hovermode="x unified",
                 legend=dict(
-                    orientation="h", y=-0.12
+                    orientation="h", y=-0.15
                 ),
             )
         else:
-            curve_fig = _empty_figure(
-                "Residual Load"
+            m_fig = _empty_figure(
+                "Monthly Residual"
             )
 
-        # Residual vs price scatter
-        if (
-            not merged.empty
-            and not prices_df.empty
-        ):
-            scatter_merged = pd.merge_asof(
-                merged[
-                    ["timestamp", "residual_load"]
-                ].sort_values("timestamp"),
-                prices_df.sort_values("timestamp"),
-                on="timestamp",
-                direction="nearest",
+        # --- Chart 2: Duck Curve Overlay ---
+        if not merged_d.empty:
+            duck_fig = go.Figure()
+            md = merged_d.copy()
+            md["hour"] = md["timestamp"].dt.hour
+            md["quarter"] = (
+                md["timestamp"]
+                .dt.to_period("Q")
+                .astype(str)
             )
-            sc_fig = scatter_chart(
-                scatter_merged,
-                "residual_load",
-                "price_eur_mwh",
-                title="Residual Load vs DA Price",
-                x_title="Residual Load (MW)",
-                y_title="EUR/MWh",
+            unique_q = sorted(
+                md["quarter"].unique()
+            )
+            # Pick up to 4 quarters spread out
+            if len(unique_q) > 4:
+                step = max(1, len(unique_q) // 4)
+                q_pick = unique_q[::step][:4]
+            else:
+                q_pick = unique_q
+
+            q_colors = [
+                COLORS["accent_blue"],
+                COLORS["accent_green"],
+                COLORS["accent_amber"],
+                COLORS["accent_red"],
+            ]
+            for i, q in enumerate(q_pick):
+                q_data = md[md["quarter"] == q]
+                hourly_avg = (
+                    q_data.groupby("hour")[
+                        "residual_load"
+                    ]
+                    .mean()
+                    .reset_index()
+                )
+                duck_fig.add_trace(
+                    go.Scatter(
+                        x=hourly_avg["hour"],
+                        y=hourly_avg[
+                            "residual_load"
+                        ],
+                        mode="lines",
+                        name=q,
+                        line=dict(
+                            color=q_colors[
+                                i
+                                % len(q_colors)
+                            ],
+                            width=2.5,
+                        ),
+                        hovertemplate=(
+                            f"{q} H%{{x}}: "
+                            "%{y:,.0f} MW"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+            duck_fig.add_hline(
+                y=0,
+                line_dash="dash",
+                line_color=COLORS["text_muted"],
+                line_width=1,
+            )
+            apply_theme(duck_fig)
+            duck_fig.update_layout(
+                title=dict(
+                    text=(
+                        "Duck Curve Overlay"
+                        " by Quarter"
+                    ),
+                    font=dict(size=15),
+                ),
+                xaxis=dict(
+                    title="Hour of Day",
+                    dtick=2,
+                ),
+                yaxis=dict(title="MW"),
+                legend=dict(
+                    orientation="h", y=-0.15
+                ),
             )
         else:
-            sc_fig = _empty_figure(
-                "Residual Load vs Price"
+            duck_fig = _empty_figure(
+                "Duck Curve"
             )
 
-        # Cross-border flows
-        if not flows_df.empty:
-            country_avg = (
-                flows_df.groupby("country")[
-                    "flow_mw"
-                ]
-                .mean()
-                .sort_values()
-                .reset_index()
-            )
-            colors = [
-                COLORS["accent_green"]
-                if v > 0
-                else COLORS["accent_red"]
-                for v in country_avg["flow_mw"]
-            ]
-            flows_fig = go.Figure(
+        # --- Chart 3: Negative Residual Hours ---
+        if not neg_res.empty:
+            neg_fig = go.Figure()
+            neg_fig.add_trace(
                 go.Bar(
-                    y=country_avg["country"],
-                    x=country_avg["flow_mw"],
-                    orientation="h",
-                    marker_color=colors,
+                    x=neg_res["month_dt"],
+                    y=neg_res["neg_count"],
+                    marker_color=COLORS[
+                        "accent_green"
+                    ],
                     marker_line_width=0,
+                    name="Neg Hours",
                     hovertemplate=(
-                        "%{y}: %{x:,.0f} MW"
+                        "%{x|%Y-%m}<br>"
+                        "%{y} intervals"
                         "<extra></extra>"
                     ),
                 )
             )
-            flows_fig.add_vline(
-                x=0,
-                line_color=COLORS["text_muted"],
-                line_width=1,
+            add_trendline_trace(
+                neg_fig,
+                neg_res["month_dt"],
+                neg_res["neg_count"].astype(
+                    float
+                ),
+                color=COLORS["accent_red"],
+                name="Trend",
             )
-            apply_theme(flows_fig)
-            flows_fig.update_layout(
+            apply_theme(neg_fig)
+            neg_fig.update_layout(
                 title=dict(
                     text=(
-                        "Avg Cross-Border Flows"
-                        " (+ Export / - Import)"
+                        "Negative Residual"
+                        " Hours/Month + Trend"
                     ),
                     font=dict(size=15),
                 ),
-                xaxis=dict(title="MW"),
-                height=300,
+                yaxis=dict(title="Count"),
+                legend=dict(
+                    orientation="h", y=-0.15
+                ),
             )
         else:
-            flows_fig = _empty_figure(
-                "Cross-Border Flows"
+            neg_fig = _empty_figure(
+                "Negative Residual Hours"
             )
 
-        # Residual load heatmap
-        if not merged.empty:
-            m = merged.copy()
-            m["hour"] = m["timestamp"].dt.hour
-            m["date"] = m[
-                "timestamp"
-            ].dt.date.astype(str)
-            pivot = m.pivot_table(
-                values="residual_load",
-                index="date",
-                columns="hour",
-                aggfunc="mean",
+        # --- Chart 4: Min Residual 1st Derivative ---
+        if not monthly_stats.empty:
+            d1 = compute_monthly_derivative(
+                monthly_stats["min_residual"]
             )
-            pivot = pivot.sort_index(ascending=True)
-            hours = list(range(24))
-            existing = [
-                h
-                for h in hours
-                if h in pivot.columns
+            colors = [
+                COLORS["accent_green"]
+                if v <= 0
+                else COLORS["accent_red"]
+                for v in d1.fillna(0)
             ]
-            hm_fig = heatmap_chart(
-                z_data=pivot[existing].values,
-                x_labels=[
-                    f"{h:02d}:00" for h in existing
-                ],
-                y_labels=list(pivot.index),
-                title=(
-                    "Residual Load Heatmap"
-                    " (MW by Hour & Date)"
+            min_d_fig = go.Figure(
+                go.Bar(
+                    x=monthly_stats["month_dt"],
+                    y=d1,
+                    marker_color=colors,
+                    marker_line_width=0,
+                    hovertemplate=(
+                        "%{x|%Y-%m}<br>"
+                        "Change: %{y:,.0f} MW"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+            min_d_fig.add_hline(
+                y=0,
+                line_color=COLORS["text_muted"],
+                line_width=1,
+            )
+            apply_theme(min_d_fig)
+            min_d_fig.update_layout(
+                title=dict(
+                    text=(
+                        "Min Residual Load"
+                        " \u2014 1st Derivative"
+                        " (Deepening Rate)"
+                    ),
+                    font=dict(size=15),
                 ),
-                colorscale="RdBu_r",
-                z_label="MW",
+                yaxis=dict(
+                    title="MoM Change (MW)"
+                ),
             )
         else:
-            hm_fig = _empty_figure(
-                "Residual Load Heatmap"
+            min_d_fig = _empty_figure(
+                "Min Residual Derivative"
             )
 
         return (
             kpis,
-            curve_fig,
-            sc_fig,
-            flows_fig,
-            hm_fig,
+            m_fig,
+            duck_fig,
+            neg_fig,
+            min_d_fig,
         )

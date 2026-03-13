@@ -1,14 +1,16 @@
-"""Tab 4: BESS Arbitrage & Revenue — spread analysis for Spain."""
+"""Tab 5: BESS Revenue Outlook — long-term revenue trajectory and viability."""
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, dcc, html
 
-from components.charts import (
-    _empty_figure,
-    heatmap_chart,
+from components.analytics import (
+    add_projection_trace,
+    add_trendline_trace,
+    compute_linear_trend,
 )
+from components.charts import _empty_figure
 from components.kpi_cards import kpi_card
 from components.theme import COLORS, apply_theme, card_style
 from data.api_client import fetch_day_ahead_prices
@@ -38,13 +40,17 @@ def layout():
                         max=500,
                         step=1,
                         style={
-                            "backgroundColor": COLORS[
-                                "bg"
+                            "backgroundColor": (
+                                COLORS["bg"]
+                            ),
+                            "color": COLORS[
+                                "text"
                             ],
-                            "color": COLORS["text"],
                             "border": (
                                 "1px solid "
-                                + COLORS["card_border"]
+                                + COLORS[
+                                    "card_border"
+                                ]
                             ),
                             "borderRadius": "6px",
                             "padding": "8px 12px",
@@ -70,18 +76,29 @@ def layout():
                     dcc.Dropdown(
                         id="es-bess-duration",
                         options=[
-                            {"label": "1h", "value": 1},
-                            {"label": "2h", "value": 2},
-                            {"label": "4h", "value": 4},
+                            {
+                                "label": "1h",
+                                "value": 1,
+                            },
+                            {
+                                "label": "2h",
+                                "value": 2,
+                            },
+                            {
+                                "label": "4h",
+                                "value": 4,
+                            },
                         ],
                         value=2,
                         clearable=False,
                         style={
                             "width": "100px",
-                            "backgroundColor": COLORS[
-                                "bg"
+                            "backgroundColor": (
+                                COLORS["bg"]
+                            ),
+                            "color": COLORS[
+                                "text"
                             ],
-                            "color": COLORS["text"],
                         },
                     ),
                 ],
@@ -122,7 +139,48 @@ def layout():
                 style={
                     "flex": "1",
                     "minWidth": "200px",
+                    "marginRight": "24px",
                 },
+            ),
+            html.Div(
+                [
+                    html.Label(
+                        "CAPEX (EUR/kWh)",
+                        style={
+                            "color": COLORS[
+                                "text_muted"
+                            ],
+                            "fontSize": "12px",
+                            "marginBottom": "4px",
+                            "display": "block",
+                        },
+                    ),
+                    dcc.Input(
+                        id="es-bess-capex",
+                        type="number",
+                        value=250,
+                        min=50,
+                        max=800,
+                        step=10,
+                        style={
+                            "backgroundColor": (
+                                COLORS["bg"]
+                            ),
+                            "color": COLORS[
+                                "text"
+                            ],
+                            "border": (
+                                "1px solid "
+                                + COLORS[
+                                    "card_border"
+                                ]
+                            ),
+                            "borderRadius": "6px",
+                            "padding": "8px 12px",
+                            "width": "100px",
+                        },
+                    ),
+                ],
             ),
         ],
         style={
@@ -140,7 +198,7 @@ def layout():
                 [
                     html.Div(
                         dcc.Graph(
-                            id="es-bess-spread-chart",
+                            id="es-bess-monthly-rev",
                             config={
                                 "displayModeBar": False
                             },
@@ -152,7 +210,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="es-bess-revenue-chart",
+                            id="es-bess-breakeven",
                             config={
                                 "displayModeBar": False
                             },
@@ -172,7 +230,7 @@ def layout():
                 [
                     html.Div(
                         dcc.Graph(
-                            id="es-bess-volatility-chart",
+                            id="es-bess-duration-rev",
                             config={
                                 "displayModeBar": False
                             },
@@ -184,7 +242,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="es-bess-optimal-chart",
+                            id="es-bess-profitable",
                             config={
                                 "displayModeBar": False
                             },
@@ -202,8 +260,10 @@ def layout():
             ),
             html.Div(
                 dcc.Graph(
-                    id="es-bess-monthly-chart",
-                    config={"displayModeBar": False},
+                    id="es-bess-stacking",
+                    config={
+                        "displayModeBar": False
+                    },
                 ),
                 style=card_style(),
             ),
@@ -216,19 +276,19 @@ def register_callbacks(app):
         [
             Output("es-bess-kpis", "children"),
             Output(
-                "es-bess-spread-chart", "figure"
+                "es-bess-monthly-rev", "figure"
             ),
             Output(
-                "es-bess-revenue-chart", "figure"
+                "es-bess-breakeven", "figure"
             ),
             Output(
-                "es-bess-volatility-chart", "figure"
+                "es-bess-duration-rev", "figure"
             ),
             Output(
-                "es-bess-optimal-chart", "figure"
+                "es-bess-profitable", "figure"
             ),
             Output(
-                "es-bess-monthly-chart", "figure"
+                "es-bess-stacking", "figure"
             ),
         ],
         [
@@ -237,6 +297,7 @@ def register_callbacks(app):
             Input("es-bess-mw", "value"),
             Input("es-bess-duration", "value"),
             Input("es-bess-efficiency", "value"),
+            Input("es-bess-capex", "value"),
         ],
     )
     def update_bess(
@@ -245,6 +306,7 @@ def register_callbacks(app):
         mw,
         duration,
         efficiency,
+        capex_kwh,
     ):
         start = pd.Timestamp(
             start_date
@@ -255,7 +317,9 @@ def register_callbacks(app):
         mw = mw or 10
         duration = duration or 2
         efficiency = (efficiency or 85) / 100.0
+        capex_kwh = capex_kwh or 250
         mwh = mw * duration
+        total_capex = capex_kwh * mwh * 1000
 
         if df.empty:
             empty = _empty_figure("No Data")
@@ -263,31 +327,12 @@ def register_callbacks(app):
                 [
                     html.Div(
                         kpi_card(
-                            "Daily Spread", "N/A"
-                        ),
-                        style={"flex": "1"},
-                    ),
-                    html.Div(
-                        kpi_card(
-                            "Est. Daily Revenue",
+                            "Revenue Trend",
                             "N/A",
                         ),
                         style={"flex": "1"},
                     ),
-                    html.Div(
-                        kpi_card(
-                            "Profitable Days",
-                            "N/A",
-                        ),
-                        style={"flex": "1"},
-                    ),
-                    html.Div(
-                        kpi_card(
-                            "Best Spread", "N/A"
-                        ),
-                        style={"flex": "1"},
-                    ),
-                ],
+                ] * 4,
                 style={
                     "display": "flex",
                     "gap": "16px",
@@ -304,64 +349,108 @@ def register_callbacks(app):
             )
 
         # Daily analysis
-        df_daily = df.copy()
-        df_daily["date"] = df_daily[
-            "timestamp"
-        ].dt.date
-        daily = df_daily.groupby("date").agg(
+        p = df.copy()
+        p["date"] = p["timestamp"].dt.date
+        daily = p.groupby("date").agg(
             price_min=("price_eur_mwh", "min"),
             price_max=("price_eur_mwh", "max"),
-            price_std=("price_eur_mwh", "std"),
         )
         daily["spread"] = (
             daily["price_max"] - daily["price_min"]
         )
-        daily["revenue_1cycle"] = (
+        daily["revenue"] = (
             daily["spread"] * mwh * efficiency
         )
         daily = daily.reset_index()
+        daily["month"] = pd.to_datetime(
+            daily["date"]
+        ).dt.to_period("M")
 
-        avg_spread = daily["spread"].mean()
-        avg_revenue = daily["revenue_1cycle"].mean()
-        profitable = int(
-            (daily["revenue_1cycle"] > 0).sum()
+        # Monthly aggregation
+        monthly = (
+            daily.groupby("month")
+            .agg(
+                total_rev=("revenue", "sum"),
+                avg_spread=("spread", "mean"),
+                profitable_days=(
+                    "revenue",
+                    lambda x: (x > 0).sum(),
+                ),
+                total_days=("date", "count"),
+            )
+            .reset_index()
         )
-        best_spread = daily["spread"].max()
+        monthly["month_dt"] = monthly[
+            "month"
+        ].apply(lambda x: x.to_timestamp())
+        monthly["rev_per_mwh"] = (
+            monthly["total_rev"] / (mwh * 30)
+        )
+
+        # Break-even spread
+        # Annual CAPEX amortized over 15 years,
+        # daily cycles * 365
+        annual_capex = total_capex / 15
+        daily_capex = annual_capex / 365
+        breakeven_spread = daily_capex / (
+            mwh * efficiency
+        )
+
+        # --- KPIs ---
+        rev_slope, _, _ = compute_linear_trend(
+            monthly["total_rev"]
+        )
+        rev_growth = "N/A"
+        if monthly["total_rev"].mean() > 0:
+            pct = (
+                rev_slope
+                / monthly["total_rev"].mean()
+                * 100
+                * 12
+            )
+            rev_growth = f"{pct:+.1f}%/year"
+
+        avg_cycles = "~1.0/day"
+        if not daily.empty:
+            # Simple estimate: profitable days
+            prof_ratio = (
+                daily["revenue"] > 0
+            ).mean()
+            avg_cycles = (
+                f"~{prof_ratio:.1f}/day"
+            )
 
         kpis = html.Div(
             [
                 html.Div(
                     kpi_card(
-                        "Avg Daily Spread",
-                        f"{avg_spread:.1f}"
+                        "Revenue Trend",
+                        f"{rev_slope:,.0f}"
+                        " EUR/mo/mo",
+                    ),
+                    style={"flex": "1"},
+                ),
+                html.Div(
+                    kpi_card(
+                        "Revenue Growth",
+                        rev_growth,
+                    ),
+                    style={"flex": "1"},
+                ),
+                html.Div(
+                    kpi_card(
+                        "Avg Profitable Ratio",
+                        avg_cycles,
+                    ),
+                    style={"flex": "1"},
+                ),
+                html.Div(
+                    kpi_card(
+                        "Break-Even Spread",
+                        f"{breakeven_spread:.1f}"
                         " EUR/MWh",
-                    ),
-                    style={"flex": "1"},
-                ),
-                html.Div(
-                    kpi_card(
-                        "Est. Daily Revenue"
-                        " (1 cycle)",
-                        f"\u20ac{avg_revenue:,.0f}",
-                        f"{mw} MW / {mwh} MWh"
-                        f" / {efficiency*100:.0f}%"
-                        " eff",
-                    ),
-                    style={"flex": "1"},
-                ),
-                html.Div(
-                    kpi_card(
-                        "Profitable Days",
-                        f"{profitable}"
-                        f" / {len(daily)}",
-                    ),
-                    style={"flex": "1"},
-                ),
-                html.Div(
-                    kpi_card(
-                        "Best Daily Spread",
-                        f"{best_spread:.1f}"
-                        " EUR/MWh",
+                        f"CAPEX {capex_kwh}"
+                        " EUR/kWh / 15yr",
                     ),
                     style={"flex": "1"},
                 ),
@@ -373,229 +462,260 @@ def register_callbacks(app):
             },
         )
 
-        # Spread chart
-        spread_fig = go.Figure()
-        spread_fig.add_trace(
+        # --- Chart 1: Monthly Arbitrage Revenue ---
+        rev_fig = go.Figure()
+        rev_fig.add_trace(
             go.Bar(
-                x=daily["date"],
-                y=daily["spread"],
-                name="Spread",
-                marker_color=COLORS["accent_amber"],
+                x=monthly["month_dt"],
+                y=monthly["total_rev"],
+                name="Monthly Revenue",
+                marker_color=COLORS[
+                    "accent_green"
+                ],
                 marker_line_width=0,
                 hovertemplate=(
-                    "%{x}<br>"
+                    "%{x|%Y-%m}<br>"
+                    "Revenue: \u20ac%{y:,.0f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        add_trendline_trace(
+            rev_fig,
+            monthly["month_dt"],
+            monthly["total_rev"],
+            color=COLORS["accent_red"],
+            name="Trend",
+        )
+        add_projection_trace(
+            rev_fig,
+            list(monthly["month_dt"]),
+            monthly["total_rev"],
+            n_future=12,
+            color=COLORS["accent_cyan"],
+            name="12M Projection",
+        )
+        apply_theme(rev_fig)
+        rev_fig.update_layout(
+            title=dict(
+                text=(
+                    "Monthly Arbitrage Revenue"
+                    " + 12M Projection"
+                ),
+                font=dict(size=15),
+            ),
+            yaxis=dict(title="EUR"),
+            legend=dict(
+                orientation="h", y=-0.15
+            ),
+        )
+
+        # --- Chart 2: Break-Even Analysis ---
+        be_fig = go.Figure()
+        be_fig.add_trace(
+            go.Bar(
+                x=monthly["month_dt"],
+                y=monthly["avg_spread"],
+                name="Avg Daily Spread",
+                marker_color=COLORS[
+                    "accent_blue"
+                ],
+                marker_line_width=0,
+                hovertemplate=(
+                    "%{x|%Y-%m}<br>"
                     "Spread: %{y:.1f} EUR/MWh"
                     "<extra></extra>"
                 ),
             )
         )
-        spread_fig.add_trace(
-            go.Scatter(
-                x=daily["date"],
-                y=daily["price_min"],
-                name="Min (Buy)",
-                mode="markers",
-                marker=dict(
-                    color=COLORS["accent_green"],
-                    size=6,
-                ),
-            )
-        )
-        spread_fig.add_trace(
-            go.Scatter(
-                x=daily["date"],
-                y=daily["price_max"],
-                name="Max (Sell)",
-                mode="markers",
-                marker=dict(
-                    color=COLORS["accent_red"],
-                    size=6,
-                ),
-            )
-        )
-        apply_theme(spread_fig)
-        spread_fig.update_layout(
-            title=dict(
-                text="Daily Min/Max Price Spread",
-                font=dict(size=15),
+        be_fig.add_hline(
+            y=breakeven_spread,
+            line_dash="dash",
+            line_color=COLORS["accent_red"],
+            line_width=2,
+            annotation_text=(
+                f"Break-even:"
+                f" {breakeven_spread:.1f}"
+                " EUR/MWh"
             ),
-            yaxis=dict(title="EUR/MWh"),
-            legend=dict(orientation="h", y=-0.15),
+            annotation_font_color=COLORS[
+                "accent_red"
+            ],
         )
-
-        # Revenue chart
-        rev_fig = go.Figure()
-        rev_fig.add_trace(
-            go.Bar(
-                x=daily["date"],
-                y=daily["revenue_1cycle"],
-                name="1 Cycle/Day",
-                marker_color=COLORS["accent_blue"],
-                marker_line_width=0,
-                hovertemplate=(
-                    "%{x}<br>"
-                    "Revenue: \u20ac%{y:,.0f}"
-                    "<extra></extra>"
-                ),
-            )
+        add_trendline_trace(
+            be_fig,
+            monthly["month_dt"],
+            monthly["avg_spread"],
+            color=COLORS["accent_amber"],
+            name="Spread Trend",
         )
-        rev_fig.add_trace(
-            go.Bar(
-                x=daily["date"],
-                y=daily["revenue_1cycle"] * 1.7,
-                name="2 Cycles/Day (est.)",
-                marker_color=COLORS["accent_cyan"],
-                marker_line_width=0,
-                opacity=0.6,
-                hovertemplate=(
-                    "%{x}<br>"
-                    "Revenue: \u20ac%{y:,.0f}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-        apply_theme(rev_fig)
-        rev_fig.update_layout(
-            title=dict(
-                text="Estimated Arbitrage Revenue",
-                font=dict(size=15),
-            ),
-            yaxis=dict(title="EUR"),
-            barmode="group",
-            legend=dict(orientation="h", y=-0.15),
-        )
-
-        # Volatility
-        vol_fig = go.Figure(
-            go.Scatter(
-                x=daily["date"],
-                y=daily["price_std"],
-                mode="lines+markers",
-                line=dict(
-                    color=COLORS["accent_purple"],
-                    width=2,
-                ),
-                marker=dict(size=5),
-                fill="tozeroy",
-                fillcolor="rgba(139,92,246,0.1)",
-                hovertemplate=(
-                    "%{x}<br>"
-                    "Std Dev: %{y:.1f} EUR/MWh"
-                    "<extra></extra>"
-                ),
-            )
-        )
-        apply_theme(vol_fig)
-        vol_fig.update_layout(
+        apply_theme(be_fig)
+        be_fig.update_layout(
             title=dict(
                 text=(
-                    "Intraday Price Volatility"
-                    " (Std Dev)"
+                    "Break-Even Analysis"
+                    " \u2014 Spread vs Threshold"
                 ),
                 font=dict(size=15),
             ),
             yaxis=dict(title="EUR/MWh"),
+            legend=dict(
+                orientation="h", y=-0.15
+            ),
         )
 
-        # Optimal charge/discharge heatmap
-        df_tmp = df.copy()
-        df_tmp["hour"] = df_tmp["timestamp"].dt.hour
-        df_tmp["date"] = df_tmp[
-            "timestamp"
-        ].dt.date.astype(str)
-        pivot = df_tmp.pivot_table(
-            values="price_eur_mwh",
-            index="date",
-            columns="hour",
-            aggfunc="mean",
+        # --- Chart 3: Revenue Duration Curve ---
+        sorted_rev = np.sort(
+            monthly["total_rev"].values
+        )[::-1]
+        pct = np.linspace(
+            0, 100, len(sorted_rev)
         )
-        pivot = pivot.sort_index(ascending=True)
-        hours = list(range(24))
-        existing = [
-            h for h in hours if h in pivot.columns
-        ]
-
-        opt_fig = heatmap_chart(
-            z_data=pivot[existing].values,
-            x_labels=[
-                f"{h:02d}:00" for h in existing
-            ],
-            y_labels=list(pivot.index),
-            title="Optimal Charge/Discharge Hours",
-            colorscale="RdYlGn_r",
-            z_label="EUR/MWh",
-        )
-
-        # Monthly revenue potential
-        daily["month"] = pd.to_datetime(
-            daily["date"]
-        ).dt.to_period("M")
-        monthly = (
-            daily.groupby("month")
-            .agg(
-                total_revenue=(
-                    "revenue_1cycle",
-                    "sum",
+        dur_fig = go.Figure(
+            go.Scatter(
+                x=pct,
+                y=sorted_rev,
+                mode="lines",
+                line=dict(
+                    color=COLORS["accent_green"],
+                    width=2.5,
                 ),
-                avg_spread=("spread", "mean"),
-                days=("date", "count"),
-            )
-            .reset_index()
-        )
-        monthly["month"] = monthly["month"].astype(
-            str
-        )
-
-        monthly_fig = go.Figure()
-        monthly_fig.add_trace(
-            go.Bar(
-                x=monthly["month"],
-                y=monthly["total_revenue"],
-                name="Monthly Revenue",
-                marker_color=COLORS["accent_green"],
-                marker_line_width=0,
+                fill="tozeroy",
+                fillcolor=(
+                    "rgba(16,185,129,0.1)"
+                ),
                 hovertemplate=(
-                    "%{x}<br>"
-                    "Revenue: \u20ac%{y:,.0f}<br>"
+                    "%{x:.0f}% of months<br>"
+                    "\u20ac%{y:,.0f}"
                     "<extra></extra>"
                 ),
             )
         )
-        monthly_fig.add_trace(
-            go.Scatter(
-                x=monthly["month"],
-                y=monthly["avg_spread"],
-                name="Avg Spread",
-                mode="lines+markers",
-                line=dict(
-                    color=COLORS["accent_amber"],
-                    width=2.5,
+        apply_theme(dur_fig)
+        dur_fig.update_layout(
+            title=dict(
+                text=(
+                    "Revenue Duration Curve"
+                    " (Monthly)"
                 ),
-                marker=dict(size=7),
-                yaxis="y2",
+                font=dict(size=15),
+            ),
+            xaxis=dict(title="% of Months"),
+            yaxis=dict(title="EUR"),
+        )
+
+        # --- Chart 4: Profitable Days/Month ---
+        prof_fig = go.Figure()
+        prof_fig.add_trace(
+            go.Bar(
+                x=monthly["month_dt"],
+                y=monthly["profitable_days"],
+                name="Profitable Days",
+                marker_color=COLORS[
+                    "accent_amber"
+                ],
+                marker_line_width=0,
+                hovertemplate=(
+                    "%{x|%Y-%m}<br>"
+                    "%{y} days"
+                    "<extra></extra>"
+                ),
             )
         )
-        apply_theme(monthly_fig)
-        monthly_fig.update_layout(
+        add_trendline_trace(
+            prof_fig,
+            monthly["month_dt"],
+            monthly["profitable_days"].astype(
+                float
+            ),
+            color=COLORS["accent_red"],
+            name="Trend",
+        )
+        apply_theme(prof_fig)
+        prof_fig.update_layout(
             title=dict(
-                text="Monthly Revenue Potential",
+                text=(
+                    "Profitable Days"
+                    " per Month + Trend"
+                ),
+                font=dict(size=15),
+            ),
+            yaxis=dict(title="Days"),
+            legend=dict(
+                orientation="h", y=-0.15
+            ),
+        )
+
+        # --- Chart 5: Revenue Stacking ---
+        # Simple estimate: arbitrage + ancillary
+        stack_fig = go.Figure()
+        arb_rev = monthly["total_rev"].values
+        # Estimate ancillary as ~40% of arbitrage
+        afrr_est = arb_rev * 0.25
+        mfrr_est = arb_rev * 0.15
+
+        stack_fig.add_trace(
+            go.Bar(
+                x=monthly["month_dt"],
+                y=arb_rev,
+                name="Arbitrage",
+                marker_color=COLORS[
+                    "accent_blue"
+                ],
+                marker_line_width=0,
+            )
+        )
+        stack_fig.add_trace(
+            go.Bar(
+                x=monthly["month_dt"],
+                y=afrr_est,
+                name="aFRR (est.)",
+                marker_color=COLORS[
+                    "accent_green"
+                ],
+                marker_line_width=0,
+            )
+        )
+        stack_fig.add_trace(
+            go.Bar(
+                x=monthly["month_dt"],
+                y=mfrr_est,
+                name="mFRR (est.)",
+                marker_color=COLORS[
+                    "accent_amber"
+                ],
+                marker_line_width=0,
+            )
+        )
+        total_stack = arb_rev + afrr_est + mfrr_est
+        add_trendline_trace(
+            stack_fig,
+            monthly["month_dt"],
+            pd.Series(total_stack),
+            color=COLORS["accent_red"],
+            name="Total Trend",
+        )
+        apply_theme(stack_fig)
+        stack_fig.update_layout(
+            title=dict(
+                text=(
+                    "Revenue Stacking Evolution"
+                    " (Arb + aFRR + mFRR est.)"
+                ),
                 font=dict(size=15),
             ),
             yaxis=dict(title="EUR"),
-            yaxis2=dict(
-                title="Avg Spread (EUR/MWh)",
-                overlaying="y",
-                side="right",
-                gridcolor="rgba(0,0,0,0)",
+            barmode="stack",
+            legend=dict(
+                orientation="h", y=-0.15
             ),
-            legend=dict(orientation="h", y=-0.15),
         )
 
         return (
             kpis,
-            spread_fig,
             rev_fig,
-            vol_fig,
-            opt_fig,
-            monthly_fig,
+            be_fig,
+            dur_fig,
+            prof_fig,
+            stack_fig,
         )

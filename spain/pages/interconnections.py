@@ -1,15 +1,20 @@
-"""Tab 9: Interconnection Flows — France, Portugal, Morocco borders."""
+"""Tab 7: Cross-Border Flow Trends — market coupling and export dependency."""
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, dcc, html
 
+from components.analytics import (
+    add_trendline_trace,
+    compute_linear_trend,
+)
 from components.charts import _empty_figure
 from components.kpi_cards import kpi_card
 from components.theme import COLORS, apply_theme, card_style
 from data.api_client import (
     fetch_cross_border_flows,
-    fetch_day_ahead_prices,
+    fetch_generation_by_source,
 )
 
 BORDER_COLORS = {
@@ -25,7 +30,7 @@ def layout():
             html.Div(id="es-interconn-kpis"),
             html.Div(
                 dcc.Graph(
-                    id="es-interconn-timeseries",
+                    id="es-interconn-monthly",
                     config={"displayModeBar": False},
                 ),
                 style=card_style(),
@@ -34,7 +39,7 @@ def layout():
                 [
                     html.Div(
                         dcc.Graph(
-                            id="es-interconn-bar",
+                            id="es-interconn-net-pos",
                             config={
                                 "displayModeBar": False
                             },
@@ -46,7 +51,7 @@ def layout():
                     ),
                     html.Div(
                         dcc.Graph(
-                            id="es-interconn-price-corr",
+                            id="es-interconn-re-corr",
                             config={
                                 "displayModeBar": False
                             },
@@ -62,6 +67,13 @@ def layout():
                     "gap": "16px",
                 },
             ),
+            html.Div(
+                dcc.Graph(
+                    id="es-interconn-congestion",
+                    config={"displayModeBar": False},
+                ),
+                style=card_style(),
+            ),
         ]
     )
 
@@ -73,11 +85,17 @@ def register_callbacks(app):
                 "es-interconn-kpis", "children"
             ),
             Output(
-                "es-interconn-timeseries", "figure"
+                "es-interconn-monthly", "figure"
             ),
-            Output("es-interconn-bar", "figure"),
             Output(
-                "es-interconn-price-corr", "figure"
+                "es-interconn-net-pos", "figure"
+            ),
+            Output(
+                "es-interconn-re-corr", "figure"
+            ),
+            Output(
+                "es-interconn-congestion",
+                "figure",
             ),
         ],
         [
@@ -93,84 +111,132 @@ def register_callbacks(app):
         ).to_pydatetime()
         end = pd.Timestamp(end_date).to_pydatetime()
 
-        flows = fetch_cross_border_flows(start, end)
-        prices = fetch_day_ahead_prices(start, end)
+        flows = fetch_cross_border_flows(
+            start, end, time_trunc="month"
+        )
+        gen = fetch_generation_by_source(
+            start, end, time_trunc="month"
+        )
 
-        # Per-border KPIs
+        # Monthly aggregation from raw flows
+        if not flows.empty:
+            flows_m = flows.copy()
+            flows_m["month"] = flows_m[
+                "timestamp"
+            ].dt.to_period("M")
+
+            # Per-border monthly avg
+            border_monthly = (
+                flows_m.groupby(
+                    ["month", "country"]
+                )["flow_mw"]
+                .mean()
+                .reset_index()
+            )
+            border_monthly["month_dt"] = (
+                border_monthly["month"].apply(
+                    lambda x: x.to_timestamp()
+                )
+            )
+
+            # Total net position
+            net_monthly = (
+                flows_m.groupby("month")[
+                    "flow_mw"
+                ]
+                .mean()
+                .reset_index(name="net_flow")
+            )
+            net_monthly["month_dt"] = (
+                net_monthly["month"].apply(
+                    lambda x: x.to_timestamp()
+                )
+            )
+        else:
+            border_monthly = pd.DataFrame()
+            net_monthly = pd.DataFrame()
+
+        # --- KPIs ---
         france_str = "N/A"
         portugal_str = "N/A"
-        morocco_str = "N/A"
-        total_str = "N/A"
+        net_str = "N/A"
+        export_growth = "N/A"
 
-        if not flows.empty:
+        if not border_monthly.empty:
             for border in [
                 "France",
                 "Portugal",
-                "Morocco",
             ]:
-                border_data = flows[
-                    flows["country"] == border
+                bd = border_monthly[
+                    border_monthly["country"]
+                    == border
                 ]
-                if not border_data.empty:
-                    avg_flow = border_data[
-                        "flow_mw"
-                    ].mean()
-                    val = f"{avg_flow:,.0f} MW"
+                if not bd.empty:
+                    slope, _, _ = (
+                        compute_linear_trend(
+                            bd["flow_mw"]
+                        )
+                    )
+                    val = bd["flow_mw"].iloc[-1]
                     direction = (
-                        "(Export)"
-                        if avg_flow > 0
-                        else "(Import)"
+                        "Export"
+                        if val > 0
+                        else "Import"
+                    )
+                    trend_str = (
+                        f"{val:,.0f} MW ({direction})"
                     )
                     if border == "France":
-                        france_str = (
-                            f"{val} {direction}"
-                        )
+                        france_str = trend_str
                     elif border == "Portugal":
-                        portugal_str = (
-                            f"{val} {direction}"
-                        )
-                    elif border == "Morocco":
-                        morocco_str = (
-                            f"{val} {direction}"
-                        )
+                        portugal_str = trend_str
 
-            total_net = flows["flow_mw"].mean()
-            total_dir = (
-                "(Net Export)"
-                if total_net > 0
-                else "(Net Import)"
+        if not net_monthly.empty:
+            net_val = net_monthly[
+                "net_flow"
+            ].iloc[-1]
+            direction = (
+                "Net Export"
+                if net_val > 0
+                else "Net Import"
             )
-            total_str = (
-                f"{total_net:,.0f} MW {total_dir}"
+            net_str = (
+                f"{net_val:,.0f} MW ({direction})"
+            )
+            slope, _, _ = compute_linear_trend(
+                net_monthly["net_flow"]
+            )
+            export_growth = (
+                f"{slope * 12:,.0f} MW/year"
             )
 
         kpis = html.Div(
             [
                 html.Div(
                     kpi_card(
-                        "Net France Flow",
+                        "France Net Flow",
                         france_str,
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Net Portugal Flow",
+                        "Portugal Net Flow",
                         portugal_str,
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Net Morocco Flow",
-                        morocco_str,
+                        "Net Position",
+                        net_str,
                     ),
                     style={"flex": "1"},
                 ),
                 html.Div(
                     kpi_card(
-                        "Total Net Position",
-                        total_str,
+                        "Export Growth Rate",
+                        export_growth,
                     ),
                     style={"flex": "1"},
                 ),
@@ -182,42 +248,54 @@ def register_callbacks(app):
             },
         )
 
-        # Flow timeseries per border
-        if not flows.empty:
+        # --- Chart 1: Monthly Flows per Border ---
+        if not border_monthly.empty:
             ts_fig = go.Figure()
             for border in [
                 "France",
                 "Portugal",
                 "Morocco",
             ]:
-                border_data = flows[
-                    flows["country"] == border
+                bd = border_monthly[
+                    border_monthly["country"]
+                    == border
                 ]
-                if not border_data.empty:
-                    ts_fig.add_trace(
-                        go.Scatter(
-                            x=border_data[
-                                "timestamp"
-                            ],
-                            y=border_data["flow_mw"],
-                            name=border,
-                            mode="lines",
-                            line=dict(
-                                color=BORDER_COLORS.get(
-                                    border,
-                                    COLORS[
-                                        "accent_blue"
-                                    ],
-                                ),
-                                width=2,
+                if bd.empty:
+                    continue
+                ts_fig.add_trace(
+                    go.Scatter(
+                        x=bd["month_dt"],
+                        y=bd["flow_mw"],
+                        name=border,
+                        mode="lines+markers",
+                        line=dict(
+                            color=BORDER_COLORS.get(
+                                border,
+                                COLORS[
+                                    "accent_blue"
+                                ],
                             ),
-                            hovertemplate=(
-                                f"{border}: "
-                                "%{y:,.0f} MW"
-                                "<extra></extra>"
-                            ),
-                        )
+                            width=2,
+                        ),
+                        marker=dict(size=5),
+                        hovertemplate=(
+                            f"{border}: "
+                            "%{y:,.0f} MW"
+                            "<extra></extra>"
+                        ),
                     )
+                )
+                add_trendline_trace(
+                    ts_fig,
+                    bd["month_dt"],
+                    bd["flow_mw"],
+                    color=BORDER_COLORS.get(
+                        border,
+                        COLORS["accent_blue"],
+                    ),
+                    name=f"{border} Trend",
+                    dash="dot",
+                )
             ts_fig.add_hline(
                 y=0,
                 line_dash="dash",
@@ -228,15 +306,15 @@ def register_callbacks(app):
             ts_fig.update_layout(
                 title=dict(
                     text=(
-                        "Cross-Border Flows"
-                        " (+ Export / - Import)"
+                        "Monthly Cross-Border Flows"
+                        " + Trends"
                     ),
                     font=dict(size=15),
                 ),
                 yaxis=dict(title="MW"),
                 hovermode="x unified",
                 legend=dict(
-                    orientation="h", y=-0.12
+                    orientation="h", y=-0.15
                 ),
             )
         else:
@@ -244,114 +322,244 @@ def register_callbacks(app):
                 "Cross-Border Flows"
             )
 
-        # Net import/export bar per border
-        if not flows.empty:
-            country_net = (
-                flows.groupby("country")["flow_mw"]
-                .mean()
-                .reset_index()
-                .sort_values("flow_mw")
-            )
+        # --- Chart 2: Net Position Evolution ---
+        if not net_monthly.empty:
+            net_fig = go.Figure()
             colors = [
-                BORDER_COLORS.get(
-                    c, COLORS["accent_blue"]
-                )
-                for c in country_net["country"]
+                COLORS["accent_green"]
+                if v > 0
+                else COLORS["accent_red"]
+                for v in net_monthly["net_flow"]
             ]
-            bar_fig = go.Figure(
+            net_fig.add_trace(
                 go.Bar(
-                    y=country_net["country"],
-                    x=country_net["flow_mw"],
-                    orientation="h",
+                    x=net_monthly["month_dt"],
+                    y=net_monthly["net_flow"],
                     marker_color=colors,
                     marker_line_width=0,
+                    name="Net Flow",
                     hovertemplate=(
-                        "%{y}: %{x:,.0f} MW"
+                        "%{x|%Y-%m}<br>"
+                        "%{y:,.0f} MW"
                         "<extra></extra>"
                     ),
                 )
             )
-            bar_fig.add_vline(
-                x=0,
+            add_trendline_trace(
+                net_fig,
+                net_monthly["month_dt"],
+                net_monthly["net_flow"],
+                color=COLORS["accent_cyan"],
+                name="Trend",
+            )
+            net_fig.add_hline(
+                y=0,
                 line_color=COLORS["text_muted"],
                 line_width=1,
             )
-            apply_theme(bar_fig)
-            bar_fig.update_layout(
+            apply_theme(net_fig)
+            net_fig.update_layout(
                 title=dict(
                     text=(
-                        "Avg Net Flow by Border"
-                        " (MW)"
+                        "Net Position Evolution"
+                        " (+ Export / - Import)"
                     ),
                     font=dict(size=15),
                 ),
-                xaxis=dict(title="MW"),
-                height=300,
+                yaxis=dict(title="MW"),
+                legend=dict(
+                    orientation="h", y=-0.15
+                ),
             )
         else:
-            bar_fig = _empty_figure(
-                "Net Flows by Border"
+            net_fig = _empty_figure(
+                "Net Position"
             )
 
-        # Flow vs price correlation
-        if not flows.empty and not prices.empty:
-            # Aggregate total flow per timestamp
-            total_flow = (
-                flows.groupby("timestamp")[
-                    "flow_mw"
+        # --- Chart 3: Flow vs RE Penetration ---
+        source_cols = [
+            c
+            for c in gen.columns
+            if c != "timestamp"
+        ]
+        if (
+            not net_monthly.empty
+            and not gen.empty
+            and source_cols
+        ):
+            gm = gen.copy()
+            solar_cols = [
+                c
+                for c in [
+                    "solar_pv",
+                    "solar_thermal",
                 ]
-                .sum()
+                if c in gm.columns
+            ]
+            wind_cols = [
+                c
+                for c in ["wind"]
+                if c in gm.columns
+            ]
+            re_cols = solar_cols + wind_cols
+            gm["total"] = gm[
+                source_cols
+            ].sum(axis=1)
+            gm["re_pct"] = (
+                gm[re_cols].sum(axis=1)
+                / gm["total"].replace(
+                    0, float("nan")
+                )
+                * 100
+            )
+            gm["month"] = gm[
+                "timestamp"
+            ].dt.to_period("M")
+
+            re_monthly = (
+                gm.groupby("month")["re_pct"]
+                .mean()
                 .reset_index()
             )
-            merged = pd.merge_asof(
-                total_flow.sort_values("timestamp"),
-                prices.sort_values("timestamp"),
-                on="timestamp",
-                direction="nearest",
+            scatter_data = pd.merge(
+                net_monthly,
+                re_monthly,
+                on="month",
             )
-            if not merged.empty:
-                corr_fig = go.Figure(
+
+            if not scatter_data.empty:
+                re_corr_fig = go.Figure(
                     go.Scatter(
-                        x=merged["flow_mw"],
-                        y=merged["price_eur_mwh"],
+                        x=scatter_data["re_pct"],
+                        y=scatter_data[
+                            "net_flow"
+                        ],
                         mode="markers",
                         marker=dict(
                             color=COLORS[
                                 "accent_cyan"
                             ],
-                            size=4,
-                            opacity=0.6,
+                            size=8,
+                            opacity=0.7,
                         ),
                         hovertemplate=(
-                            "Net Flow: %{x:,.0f}"
-                            " MW<br>"
-                            "Price: %{y:.1f}"
-                            " EUR/MWh"
+                            "RE: %{x:.1f}%<br>"
+                            "Net Flow: %{y:,.0f} MW"
                             "<extra></extra>"
                         ),
                     )
                 )
-                apply_theme(corr_fig)
-                corr_fig.update_layout(
+                apply_theme(re_corr_fig)
+                re_corr_fig.update_layout(
                     title=dict(
                         text=(
-                            "Net Flow vs"
-                            " DA Price"
+                            "RE Penetration vs"
+                            " Net Exports"
                         ),
                         font=dict(size=15),
                     ),
                     xaxis=dict(
-                        title="Net Flow (MW)"
+                        title="Renewable %"
                     ),
-                    yaxis=dict(title="EUR/MWh"),
+                    yaxis=dict(title="Net MW"),
                 )
             else:
-                corr_fig = _empty_figure(
-                    "Flow vs Price"
+                re_corr_fig = _empty_figure(
+                    "RE vs Exports"
                 )
         else:
-            corr_fig = _empty_figure(
-                "Flow vs Price"
+            re_corr_fig = _empty_figure(
+                "RE vs Exports"
             )
 
-        return kpis, ts_fig, bar_fig, corr_fig
+        # --- Chart 4: Congestion Proxy ---
+        if not flows.empty:
+            flows_c = flows.copy()
+            flows_c["month"] = flows_c[
+                "timestamp"
+            ].dt.to_period("M")
+
+            # Extreme days: flow > 90th percentile or < 10th
+            q90 = flows_c["flow_mw"].quantile(
+                0.90
+            )
+            q10 = flows_c["flow_mw"].quantile(
+                0.10
+            )
+            extreme = flows_c[
+                (flows_c["flow_mw"] > q90)
+                | (flows_c["flow_mw"] < q10)
+            ]
+            cong_monthly = (
+                extreme.groupby("month")
+                .size()
+                .reset_index(name="extreme_days")
+            )
+            cong_monthly["month_dt"] = (
+                cong_monthly["month"].apply(
+                    lambda x: x.to_timestamp()
+                )
+            )
+
+            if not cong_monthly.empty:
+                cong_fig = go.Figure()
+                cong_fig.add_trace(
+                    go.Bar(
+                        x=cong_monthly[
+                            "month_dt"
+                        ],
+                        y=cong_monthly[
+                            "extreme_days"
+                        ],
+                        marker_color=COLORS[
+                            "accent_purple"
+                        ],
+                        marker_line_width=0,
+                        hovertemplate=(
+                            "%{x|%Y-%m}<br>"
+                            "%{y} extreme days"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+                add_trendline_trace(
+                    cong_fig,
+                    cong_monthly["month_dt"],
+                    cong_monthly[
+                        "extreme_days"
+                    ].astype(float),
+                    color=COLORS["accent_red"],
+                    name="Trend",
+                )
+                apply_theme(cong_fig)
+                cong_fig.update_layout(
+                    title=dict(
+                        text=(
+                            "Congestion Proxy"
+                            " \u2014 Extreme Flow"
+                            " Days/Month"
+                        ),
+                        font=dict(size=15),
+                    ),
+                    yaxis=dict(title="Days"),
+                    legend=dict(
+                        orientation="h",
+                        y=-0.15,
+                    ),
+                )
+            else:
+                cong_fig = _empty_figure(
+                    "Congestion Proxy"
+                )
+        else:
+            cong_fig = _empty_figure(
+                "Congestion Proxy"
+            )
+
+        return (
+            kpis,
+            ts_fig,
+            net_fig,
+            re_corr_fig,
+            cong_fig,
+        )
